@@ -1,0 +1,10 @@
+# Build artifacts
+/dungeon
+/dungeon.exe
+dungeon_audit
+build/
+cmake-build*/
+*.o
+*.obj
+*.exe
+*.out
