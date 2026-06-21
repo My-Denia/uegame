@@ -1,6 +1,8 @@
 # Build artifacts
 /dungeon
 /dungeon.exe
+/m2test
+/m2test.exe
 dungeon_audit
 build/
 cmake-build*/

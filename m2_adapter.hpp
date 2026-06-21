@@ -1,0 +1,143 @@
+// m2_adapter.hpp
+// 引擎无关的 M1 Layout -> 世界坐标适配层 (M2)。
+// 只依赖标准库 + dungeon.hpp。绝不包含任何 UE 类型 (FVector/TArray/UObject)。
+// UE 侧的 spawner 会 #include 本文件；M1 引擎无关核心 (dungeon.hpp) 保持不变。
+//
+// 职责：
+//   1. 把 Layout 的每个格子映射成一个世界放置点 (tileSize = 网格步长)。
+//   2. 提供"世界空间"的 4-邻接可达性校验 —— 独立于 M1 的网格 flood-fill，
+//      用来证明坐标映射忠实保留了 M1 的 4-连通规则 (carry-forward: 邻接一致性)。
+//   3. 提供 spawn-plan 的确定性哈希，用于 M2 验收 #4 (同种子两次 -> 同布局)。
+
+#pragma once
+
+#include "dungeon.hpp"
+
+#include <cstdint>
+#include <vector>
+#include <map>
+#include <set>
+#include <utility>
+
+namespace m2 {
+
+struct WorldConfig {
+    long long tileSize   = 100;   // 每个网格格子的世界尺寸 (UE 单位 cm)
+    long long wallHeight = 200;   // 墙体高度
+    long long originX    = 0;
+    long long originY    = 0;
+};
+
+struct TilePlacement {
+    dungeon::Tile kind;
+    int gx, gy;                   // 网格坐标
+    long long wx, wy, wz;         // 世界坐标 (格子中心)
+};
+
+// 把每个格子映射成世界放置点。floor/corridor/door 落在 z=0 (可走)，
+// wall 抬到 z = wallHeight/2 (立方体坐在地面上)。
+inline std::vector<TilePlacement> buildSpawnPlan(const dungeon::Layout& L, const WorldConfig& wc) {
+    std::vector<TilePlacement> plan;
+    const dungeon::Config& c = L.config;
+    plan.reserve(static_cast<std::size_t>(c.width) * c.height);
+    for (int y = 0; y < c.height; ++y) {
+        for (int x = 0; x < c.width; ++x) {
+            dungeon::Tile t = L.at(x, y);
+            long long wx = wc.originX + static_cast<long long>(x) * wc.tileSize + wc.tileSize / 2;
+            long long wy = wc.originY + static_cast<long long>(y) * wc.tileSize + wc.tileSize / 2;
+            long long wz = (t == dungeon::Tile::Wall) ? wc.wallHeight / 2 : 0;
+            plan.push_back({ t, x, y, wx, wy, wz });
+        }
+    }
+    return plan;
+}
+
+// 起点房间中心的世界坐标。
+inline void startWorldPos(const dungeon::Layout& L, const WorldConfig& wc,
+                          long long& wx, long long& wy) {
+    const dungeon::Room& r = L.rooms[L.startRoom];
+    wx = wc.originX + static_cast<long long>(r.cx()) * wc.tileSize + wc.tileSize / 2;
+    wy = wc.originY + static_cast<long long>(r.cy()) * wc.tileSize + wc.tileSize / 2;
+}
+
+struct WorldReach {
+    int passable     = 0;  // 可走放置点总数
+    int reached      = 0;  // 从起点在世界坐标上洪水填充到达的可走点数
+    int rooms        = 0;  // 房间数
+    int roomsReached = 0;  // 房间中心被到达数
+    bool fullyConnected() const { return passable == reached && rooms == roomsReached; }
+};
+
+// 在【世界坐标】上做 4-邻接洪水填充：邻居 = 世界距离恰为 tileSize 的正交点。
+// 这刻意不读网格索引，而是用映射后的世界坐标重建连通性 —— 若映射破坏了 4-连通
+// (例如把相邻格挪开)，本校验就会发现 reached < passable 或房间未到达。
+inline WorldReach worldReachability(const dungeon::Layout& L, const WorldConfig& wc) {
+    WorldReach wr;
+    std::vector<TilePlacement> plan = buildSpawnPlan(L, wc);
+
+    using Key = std::pair<long long, long long>;
+    std::map<Key, bool> passable;   // 世界坐标 -> 是否可走 (std::map 避免哈希碰撞误判)
+    for (const TilePlacement& p : plan) {
+        bool walk = dungeon::isPassable(p.kind);
+        passable[{ p.wx, p.wy }] = walk;
+        if (walk) ++wr.passable;
+    }
+
+    wr.rooms = static_cast<int>(L.rooms.size());
+    if (wr.rooms == 0) return wr;
+
+    long long sx = 0, sy = 0;
+    startWorldPos(L, wc, sx, sy);
+
+    std::set<Key> seen;
+    std::vector<Key> stack;
+    Key start{ sx, sy };
+    auto sit = passable.find(start);
+    if (sit != passable.end() && sit->second) {
+        seen.insert(start);
+        stack.push_back(start);
+    }
+    const long long ts = wc.tileSize;
+    while (!stack.empty()) {
+        Key cur = stack.back();
+        stack.pop_back();
+        ++wr.reached;
+        Key nb[4] = {
+            { cur.first + ts, cur.second }, { cur.first - ts, cur.second },
+            { cur.first, cur.second + ts }, { cur.first, cur.second - ts }
+        };
+        for (const Key& n : nb) {
+            if (seen.count(n)) continue;
+            auto it = passable.find(n);
+            if (it == passable.end() || !it->second) continue;
+            seen.insert(n);
+            stack.push_back(n);
+        }
+    }
+
+    for (int i = 0; i < wr.rooms; ++i) {
+        long long rx = wc.originX + static_cast<long long>(L.rooms[i].cx()) * ts + ts / 2;
+        long long ry = wc.originY + static_cast<long long>(L.rooms[i].cy()) * ts + ts / 2;
+        if (seen.count({ rx, ry })) ++wr.roomsReached;
+    }
+    return wr;
+}
+
+// spawn-plan 的 FNV-1a 64 位哈希。同 (Layout, WorldConfig) -> 同哈希。
+// 用于 M2 验收 #4：同种子两次生成 -> 哈希相同 (确定性)。
+inline std::uint64_t spawnPlanHash(const dungeon::Layout& L, const WorldConfig& wc) {
+    std::vector<TilePlacement> plan = buildSpawnPlan(L, wc);
+    std::uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+    for (const TilePlacement& p : plan) {
+        mix(static_cast<std::uint64_t>(p.kind));
+        mix(static_cast<std::uint32_t>(p.gx));
+        mix(static_cast<std::uint32_t>(p.gy));
+        mix(static_cast<std::uint64_t>(p.wx));
+        mix(static_cast<std::uint64_t>(p.wy));
+        mix(static_cast<std::uint64_t>(p.wz));
+    }
+    return h;
+}
+
+} // namespace m2
