@@ -40,6 +40,13 @@ public class uegame : ModuleRules
 			"uegame/Variant_SideScrolling/UI"
 		});
 
+		// M1/M2 engine-agnostic headers (dungeon.hpp, m2_adapter.hpp) live at the repo root
+		// (one level above this .uproject) as the single source of truth, shared as-is with
+		// the standalone g++ build. Exposed here so the future M2 spawner can #include them
+		// without moving/duplicating the verified M1 core.
+		// NOTE: not compile-verified - no UE engine is installed on this machine.
+		PrivateIncludePaths.Add(System.IO.Path.Combine(ModuleDirectory, "..", "..", ".."));
+
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
 
