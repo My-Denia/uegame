@@ -3,6 +3,8 @@
 /dungeon.exe
 /m2test
 /m2test.exe
+/m1_verify
+/m1_verify.exe
 dungeon_audit
 build/
 cmake-build*/
