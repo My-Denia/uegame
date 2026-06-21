@@ -82,3 +82,7 @@ DerivedDataCache/*
 # --- Project-specific additions (beyond upstream) ---
 # UE 5.8 / modern Visual Studio emit the XML solution format; regenerable like *.sln.
 *.slnx
+
+# Developer-local agent / MCP bridge configs (point at 127.0.0.1, not shared).
+.mcp.json
+.codex/
