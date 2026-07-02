@@ -53,12 +53,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
 	bool bSpawnEnemies = true;
 
+	/** M4: one tick after BeginPlay, start a run (floor 1) seeded from this spawner if none
+	 *  is active yet. This is the gameplay path into the floor loop - the Dungeon.StartRun
+	 *  console verb is compiled out of Shipping builds, so it cannot be the only caller.
+	 *  The FloorManager's own helper spawner has this disabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
+	bool bAutoStartRun = true;
+
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 
 	/** Rebuild ISM geometry from the M1 layout for the current Seed. Editor-safe. */
 	UFUNCTION(BlueprintCallable, Category="Dungeon")
 	void Build();
+
+	// --- M4 floor transition (mechanism (a): in-place regeneration) ---
+
+	/** Full 64-bit seed actually used by generate(). Floor seeds derived from
+	 *  (runSeed, floorIndex) exceed int32; the editor-facing int32 Seed remains for
+	 *  hand-testing and is used only when no 64-bit seed has been set. */
+	uint64 GetEffectiveSeed64() const { return bHasSeed64 ? Seed64 : static_cast<uint64>(Seed); }
+	void SetSeed64(uint64 InSeed) { Seed64 = InSeed; bHasSeed64 = true; }
+
+	/** In-place floor transition: despawn all enemies, rebuild geometry from NewSeed,
+	 *  re-dirty the navmesh over the whole map, respawn enemies (scaled), teleport the
+	 *  player to the new start room. World and nav system stay alive (no OpenLevel -
+	 *  that path loses the RecastNavMesh, M3 finding). */
+	void RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride = -1,
+	                     float InEnemyHPOverride = -1.0f);
 
 	/** Absolute world position of the start room center (valid after Build). */
 	FVector GetStartWorldLocation() const { return StartWorld; }
@@ -87,9 +109,33 @@ public:
 	}
 	int32 GetStartRoomIndex() const { return StartRoomIndex; }
 
+	/** M4: true when every room that started with enemies has zero alive. */
+	bool AreAllRoomsCleared() const
+	{
+		for (int32 i = 0; i < RoomInitialCounts.Num(); ++i)
+		{
+			if (RoomInitialCounts[i] > 0 && RoomAliveCounts.IsValidIndex(i) && RoomAliveCounts[i] > 0)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 private:
 	void SpawnNavBounds();
-	void SpawnEnemies();
+	/** M4: (re)spawn the descend stairs in the farthest room (destroys the previous pad). */
+	void SpawnStairs();
+	/** Spawn the deterministic enemy plan. Overrides (<0 = use DataTable base values)
+	 *  let RegenerateFloor apply the M4 per-floor scaling. */
+	void SpawnEnemies(int32 InEnemiesPerRoomOverride = -1, float InEnemyHPOverride = -1.0f);
+	/** Mark the whole map dirty so the dynamic navmesh rebuilds (M2 pattern, factored
+	 *  out so floor transitions can reuse it). */
+	void RefreshNavigation();
+
+	/** M4: 64-bit runtime seed (floor seeds exceed int32). */
+	uint64 Seed64 = 0;
+	bool bHasSeed64 = false;
 
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<USceneComponent> Root;
@@ -115,6 +161,7 @@ private:
 	/** All room centers in world coords (index == M1 room index); written by Build(). */
 	TArray<FVector> RoomCentersWorld;
 	int32 StartRoomIndex = 0;
+	int32 FarthestRoomIndex = 0;
 
 	/** M3 per-room enemy bookkeeping; written by SpawnEnemies(). */
 	TArray<int32> RoomAliveCounts;

@@ -15,6 +15,7 @@
 
 #include "Combat/CombatComponent.h"
 #include "Combat/DungeonEnemy.h"
+#include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Containers/Ticker.h"
@@ -345,6 +346,150 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonFaceNearestCmd(
 	TEXT("Dungeon.FaceNearest"),
 	TEXT("Rotate the player pawn to face the nearest enemy (forensic aid for the melee sweep)"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFaceNearestCmd));
+
+// --- M4 forensic verbs ---
+
+void DungeonRegenCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || !World->IsGameWorld() || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage (game worlds only): Dungeon.Regen <uint64 seed>"));
+		return;
+	}
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	if (!Spawner)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] no DungeonSpawner; run Dungeon.Spawn first"));
+		return;
+	}
+	const uint64 NewSeed = FCString::Strtoui64(*Args[0], nullptr, 10);
+	Spawner->RegenerateFloor(NewSeed);
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRegenCmd(
+	TEXT("Dungeon.Regen"),
+	TEXT("In-place regenerate the dungeon from a 64-bit seed (M4 transition spike): Dungeon.Regen <seed>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRegenCmd));
+
+void DungeonStartRunCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || !World->IsGameWorld() || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage (game worlds only): Dungeon.StartRun <uint64 runSeed>"));
+		return;
+	}
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->StartRun(FCString::Strtoui64(*Args[0], nullptr, 10));
+	}
+}
+
+void DungeonDescendCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->RequestDescend(/*bForce=*/true);   // forensic: bypass the clear-gate policy
+	}
+}
+
+void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	const UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
+
+	FString Rooms;
+	int32 Alive = 0, Total = 0;
+	if (Spawner)
+	{
+		for (int32 i = 0; i < Spawner->GetRoomCount(); ++i)
+		{
+			Alive += Spawner->GetAliveInRoom(i);
+			Total += Spawner->GetInitialInRoom(i);
+			Rooms += FString::Printf(TEXT(" r%d=%d/%d"), i, Spawner->GetAliveInRoom(i), Spawner->GetInitialInRoom(i));
+		}
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorStatus] runActive=%s floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d |%s"),
+		(FM && FM->IsRunActive()) ? TEXT("yes") : TEXT("no"),
+		FM ? FM->GetFloorIndex() : -1,
+		static_cast<unsigned long long>(FM ? FM->GetRunSeed() : 0),
+		static_cast<unsigned long long>(Spawner ? Spawner->GetEffectiveSeed64() : 0),
+		HP ? HP->GetHP() : -1.0f, HP ? HP->GetMaxHP() : -1.0f,
+		Alive, Total, *Rooms);
+}
+
+void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.SetHP <n>"));
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr)
+	{
+		HP->SetHP(FCString::Atof(*Args[0]));   // test-only cheat, like KillNearest
+	}
+}
+
+void DungeonDescendThenDieCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	// Deterministic probe for the pending-descend death window. The window is exactly one
+	// tick and the MCP bridge pumps one command per tick, so the race is not reachable from
+	// two console calls - both actions must run inside a single handler. Expected result:
+	// [FloorCompleted] -> [RunFailed] (death overrides pending descend) -> restart at floor 1,
+	// and never a floor advance with a dead pawn.
+	if (!World)
+	{
+		return;
+	}
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!FM || !HP)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] DescendThenDie needs an active run and a player"));
+		return;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[DescendThenDie] same-tick descend + lethal SetHP (window probe)"));
+	FM->RequestDescend(/*bForce=*/true);
+	HP->SetHP(0.0f);
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonStartRunCmd(
+	TEXT("Dungeon.StartRun"),
+	TEXT("Begin an M4 run at floor 1: Dungeon.StartRun <uint64 runSeed>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonStartRunCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonDescendCmd(
+	TEXT("Dungeon.Descend"),
+	TEXT("Force a floor transition (bypasses the clear-gate policy; forensic)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonDescendCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFloorStatusCmd(
+	TEXT("Dungeon.FloorStatus"),
+	TEXT("Log run/floor state: floorIndex, runSeed, spawner seed, player HP, alive/total per room"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFloorStatusCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonSetHPCmd(
+	TEXT("Dungeon.SetHP"),
+	TEXT("Test-only cheat: set the player's HP (0 triggers the death path)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonSetHPCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonDescendThenDieCmd(
+	TEXT("Dungeon.DescendThenDie"),
+	TEXT("Forensic: force-descend and kill the player in the SAME tick (pending-window probe)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonDescendThenDieCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

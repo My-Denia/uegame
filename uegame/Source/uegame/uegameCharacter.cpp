@@ -5,6 +5,7 @@
 #include "Camera/CameraComponent.h"
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
+#include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -78,7 +79,17 @@ void AuegameCharacter::DoAttack()
 
 void AuegameCharacter::HandlePlayerDeath(AActor* /*DeadActor*/)
 {
-	// Evidence (acceptance D fail-state): death log + level restart.
+	// M4: during an active run the FloorManager owns the fail state - [RunFailed] +
+	// in-place restart from floor 1 with a fresh chained seed. The pawn is revived,
+	// never destroyed, and the world is never reloaded (keeps the navmesh alive).
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()); FM && FM->IsRunActive())
+	{
+		UE_LOG(LogTemp, Display, TEXT("[PlayerDeath] player HP reached 0 during a run"));
+		FM->NotifyRunFailed();
+		return;
+	}
+
+	// Single-floor mode (no run): original M3 fail state - death log + level restart.
 	UE_LOG(LogTemp, Display, TEXT("[PlayerDeath] player HP reached 0 - restarting level in 1s"));
 	GetWorldTimerManager().SetTimer(RestartTimerHandle,
 		FTimerDelegate::CreateWeakLambda(this, [this]()

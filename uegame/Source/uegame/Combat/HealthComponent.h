@@ -34,6 +34,14 @@ public:
 	UFUNCTION(BlueprintPure, Category="Combat")
 	bool IsDead() const { return bDead; }
 
+	/** M4 forensic/managed set: clamps to [0, MaxHP], logs, fires OnDeath once at 0. */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void SetHP(float NewHP);
+
+	/** M4 run-restart path: clear the dead flag and restore HP (full refill if <0). */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void Revive(float NewHP = -1.0f);
+
 	UPROPERTY(BlueprintAssignable, Category="Combat")
 	FHealthDeathSignature OnDeath;
 

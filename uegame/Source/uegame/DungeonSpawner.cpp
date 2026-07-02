@@ -10,15 +10,19 @@
 #include "AI/Navigation/NavigationDirtyArea.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
+#include "Combat/DungeonStairs.h"
+#include "Combat/FloorManager.h"
 #include "Components/BoxComponent.h"
 #include "Components/BrushComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationSystem.h"
+#include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 
 // Engine-agnostic M1/M2 core, resolved via the repo-root PrivateIncludePaths entry in
@@ -97,9 +101,33 @@ void ADungeonSpawner::BeginPlay()
 			SpawnEnemies();
 		}
 	}
+
+	if (UWorld* World = GetWorld(); World && World->IsGameWorld())
+	{
+		SpawnStairs();   // M4: descend trigger in the farthest room (no-op until a run is active)
+
+		// M4: gameplay entry into the floor loop. Deferred one tick so the player pawn and
+		// the GameInstance subsystem are guaranteed up; re-checked at fire time because a
+		// run may have been started by then (e.g. the FloorManager's own helper spawner).
+		if (bAutoStartRun)
+		{
+			World->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateWeakLambda(this, [this]()
+				{
+					UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld());
+					if (bAutoStartRun && FM && !FM->IsRunActive())
+					{
+						UE_LOG(LogTemp, Display,
+							TEXT("[Dungeon] AutoStartRun: runSeed=%llu (from spawner seed)"),
+							static_cast<unsigned long long>(GetEffectiveSeed64()));
+						FM->StartRun(GetEffectiveSeed64());
+					}
+				}));
+		}
+	}
 }
 
-void ADungeonSpawner::SpawnEnemies()
+void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemyHPOverride)
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -109,19 +137,27 @@ void ADungeonSpawner::SpawnEnemies()
 
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();   // echoes the row once (evidence)
 
+	// M4: per-floor scaling arrives as overrides (<0 = base values from the DataTable row).
+	const int32 EffPerRoom = (InEnemiesPerRoomOverride >= 0) ? InEnemiesPerRoomOverride : Cfg.EnemiesPerRoom;
+	FCombatConfigRow EffCfg = Cfg;
+	if (InEnemyHPOverride >= 0.0f)
+	{
+		EffCfg.EnemyMaxHP = InEnemyHPOverride;
+	}
+
 	// Same deterministic pipeline as the geometry: regenerate the layout for this seed
 	// and derive placements from the seeded sub-stream. Start room excluded (deliberate
-	// contract deviation, surfaced at GATE 1): the player spawns there un-ambushed, and
+	// contract deviation, surfaced at M3 GATE 1): the player spawns there un-ambushed, and
 	// rooms with zero initial enemies never fire RoomCleared.
 	dungeon::Config DCfg;
-	DCfg.seed = static_cast<std::uint64_t>(Seed);
+	DCfg.seed = GetEffectiveSeed64();
 	const dungeon::Layout Layout = dungeon::generate(DCfg);
 
 	m2::WorldConfig WC;
 	WC.tileSize   = static_cast<long long>(TileSize);
 	WC.wallHeight = static_cast<long long>(WallHeight);
 	const std::vector<m2::EnemyPlacement> Plan =
-		m2::buildEnemyPlan(Layout, WC, Cfg.EnemiesPerRoom, Layout.startRoom);
+		m2::buildEnemyPlan(Layout, WC, EffPerRoom, Layout.startRoom);
 
 	RoomAliveCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
 	RoomInitialCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
@@ -137,7 +173,7 @@ void ADungeonSpawner::SpawnEnemies()
 		{
 			continue;
 		}
-		Enemy->InitEnemy(Cfg, P.roomIndex, this);
+		Enemy->InitEnemy(EffCfg, P.roomIndex, this);
 		Enemy->FinishSpawning(FTransform(Loc));
 		++RoomAliveCounts[P.roomIndex];
 		++RoomInitialCounts[P.roomIndex];
@@ -147,10 +183,12 @@ void ADungeonSpawner::SpawnEnemies()
 	// Evidence (acceptance B): deterministic enemy plan - tile-invariant hash must equal
 	// the g++ value for the same seed and reproduce across PIE sessions.
 	UE_LOG(LogTemp, Display,
-		TEXT("[Dungeon] enemyPlan seed=%d perRoom=%d enemies=%d spawned=%d startRoomExcluded=%d hash=0x%llx"),
-		Seed, Cfg.EnemiesPerRoom, static_cast<int32>(Plan.size()), Spawned,
+		TEXT("[Dungeon] enemyPlan seed=%llu perRoom=%d enemies=%d spawned=%d startRoomExcluded=%d hash=0x%llx effHP=%.0f"),
+		static_cast<unsigned long long>(GetEffectiveSeed64()),
+		EffPerRoom, static_cast<int32>(Plan.size()), Spawned,
 		StartRoomIndex,
-		static_cast<unsigned long long>(m2::enemyPlanHash(Plan)));
+		static_cast<unsigned long long>(m2::enemyPlanHash(Plan)),
+		EffCfg.EnemyMaxHP);
 }
 
 void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
@@ -186,7 +224,7 @@ void ADungeonSpawner::Build()
 
 	// --- Engine-agnostic core: generate the Layout and its spawn plan ---
 	dungeon::Config Cfg;
-	Cfg.seed = static_cast<std::uint64_t>(Seed);   // determinism carry-forward: mt19937_64
+	Cfg.seed = GetEffectiveSeed64();   // determinism carry-forward: mt19937_64; 64-bit for M4 floor seeds
 	const dungeon::Layout Layout = dungeon::generate(Cfg);
 
 	m2::WorldConfig WC;
@@ -228,6 +266,7 @@ void ADungeonSpawner::Build()
 	StartRoomIndex = Layout.startRoom;
 	RoomCentersWorld.Reset();
 	FarthestRoomWorld = StartWorld;
+	FarthestRoomIndex = StartRoomIndex;
 	float BestDist = -1.0f;
 	for (const dungeon::Room& R : Layout.rooms)
 	{
@@ -241,6 +280,7 @@ void ADungeonSpawner::Build()
 		{
 			BestDist = D;
 			FarthestRoomWorld = C;
+			FarthestRoomIndex = RoomCentersWorld.Num() - 1;
 		}
 	}
 
@@ -251,8 +291,8 @@ void ADungeonSpawner::Build()
 	const int32 SpawnedTotal = SpawnedWalkable + WallISM->GetInstanceCount();
 
 	UE_LOG(LogTemp, Display,
-		TEXT("[Dungeon] seed=%d rooms=%d connections=%d | spawned %d instances (%d walkable == %d plan-passable) | world reach %d/%d cells, %d/%d rooms | fully-connected=%s | planHash=0x%llx"),
-		Seed,
+		TEXT("[Dungeon] seed=%llu rooms=%d connections=%d | spawned %d instances (%d walkable == %d plan-passable) | world reach %d/%d cells, %d/%d rooms | fully-connected=%s | planHash=0x%llx"),
+		static_cast<unsigned long long>(GetEffectiveSeed64()),
 		static_cast<int32>(Layout.rooms.size()),
 		static_cast<int32>(Layout.connections.size()),
 		SpawnedTotal,
@@ -313,16 +353,13 @@ void ADungeonSpawner::SpawnNavBounds()
 	if (UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
 	{
 		Nav->OnNavigationBoundsUpdated(Vol);   // refresh with the final bounds
-
-		// The dungeon ISM geometry registered BEFORE this volume existed, so its dirty
-		// areas were dropped as out-of-bounds (LogNavigationDirtyArea "Skipped ... empty
-		// bounds"). Re-dirty the whole map explicitly so the generator rebuilds every
-		// tile now that the bounds are in place.
-		const FBox MapBox(
-			FVector(-100.0f, -100.0f, -200.0f),
-			FVector(MapW + 100.0f, MapH + 100.0f, WallHeight * 2.0f));
-		Nav->AddDirtyArea(MapBox, ENavigationDirtyFlag::All, TEXT("DungeonSpawner full rebuild"));
 	}
+
+	// The dungeon ISM geometry registered BEFORE this volume existed, so its dirty
+	// areas were dropped as out-of-bounds (LogNavigationDirtyArea "Skipped ... empty
+	// bounds"). Re-dirty the whole map explicitly so the generator rebuilds every
+	// tile now that the bounds are in place.
+	RefreshNavigation();
 
 	const FBox VolBounds = Vol->GetComponentsBoundingBox(true);
 	UE_LOG(LogTemp, Display,
@@ -330,4 +367,105 @@ void ADungeonSpawner::SpawnNavBounds()
 		Center.X, Center.Y,
 		VolBounds.IsValid ? TEXT("YES") : TEXT("NO"),
 		VolBounds.GetSize().X, VolBounds.GetSize().Y, VolBounds.GetSize().Z);
+}
+
+void ADungeonSpawner::SpawnStairs()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		return;
+	}
+
+	// The pad only forwards to RequestDescend(), which no-ops without an active run - so
+	// outside a run (BeginPlay before AutoStartRun fires, forensic Dungeon.Regen) spawning
+	// it would present a dead trigger. Single enforcement point for every call site.
+	const UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!FM || !FM->IsRunActive())
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Stairs] skipped: no active run (pad would be inert)"));
+		return;
+	}
+
+	// One pad per floor: drop the previous floor's stairs first.
+	for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+
+	const FVector Loc = FarthestRoomWorld + FVector(0.0f, 0.0f, 100.0f);
+	ADungeonStairs* Stairs = World->SpawnActor<ADungeonStairs>(ADungeonStairs::StaticClass(), Loc, FRotator::ZeroRotator);
+	if (!Stairs)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Stairs] spawn failed"));
+		return;
+	}
+
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	// Evidence: active gate policy logged at spawn (config flag, DataTable-driven).
+	UE_LOG(LogTemp, Display,
+		TEXT("[Stairs] spawned in farthest room=%d at (%.0f, %.0f) policy=%s"),
+		FarthestRoomIndex, Loc.X, Loc.Y,
+		Cfg.bRequireFloorClearToDescend ? TEXT("require-floor-clear") : TEXT("descend-anytime"));
+}
+
+void ADungeonSpawner::RefreshNavigation()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		return;
+	}
+	if (UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+	{
+		// Grid extent is fixed (64x40 cells), so the registered nav bounds stay valid across
+		// floor transitions; marking the whole map dirty makes the dynamic navmesh rebuild
+		// against the NEW geometry (M2 pattern).
+		const dungeon::Config Cfg;
+		const float MapW = Cfg.width  * TileSize;
+		const float MapH = Cfg.height * TileSize;
+		const FBox MapBox(
+			FVector(-100.0f, -100.0f, -200.0f),
+			FVector(MapW + 100.0f, MapH + 100.0f, WallHeight * 2.0f));
+		Nav->AddDirtyArea(MapBox, ENavigationDirtyFlag::All, TEXT("DungeonSpawner floor rebuild"));
+	}
+}
+
+void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride, float InEnemyHPOverride)
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Dungeon] RegenerateFloor is game-world only"));
+		return;
+	}
+
+	// Despawn floor-N enemies silently (Destroy path skips HandleDeath, so no RoomClear noise).
+	int32 Despawned = 0;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		It->Destroy();
+		++Despawned;
+	}
+
+	SetSeed64(NewSeed);
+	Build();                 // ClearInstances + rebuild geometry from the new layout
+	RefreshNavigation();     // re-dirty the whole map so the navmesh rebuilds in place
+
+	if (bTeleportPlayerToStart)
+	{
+		if (APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0))
+		{
+			Pawn->SetActorLocation(StartWorld + FVector(0.0f, 0.0f, 100.0f));
+		}
+	}
+	if (bSpawnEnemies)
+	{
+		SpawnEnemies(InEnemiesPerRoomOverride, InEnemyHPOverride);
+	}
+	SpawnStairs();           // M4: fresh descend trigger in the new farthest room
+
+	UE_LOG(LogTemp, Display,
+		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d (in-place, world+navsystem kept alive)"),
+		static_cast<unsigned long long>(NewSeed), Despawned);
 }

@@ -7,6 +7,9 @@
 //   m2test determinism [seed] 同种子两次 spawn-plan 哈希对比
 //   m2test enemies [seed] [perRoom]   M3: 打印敌人布点 + tile 无关哈希 (排除起始房)
 //   m2test enemyDeterminism [N]       M3: N 个种子 x2 生成，哈希/布点全等 + 房内校验
+//   m2test floors [runSeed] [n]       M4: 楼层 1..n 的种子/布局哈希(tile200)/敌人哈希/缩放值
+//                                     —— PIE 验证前预注册的 g++ 参考值
+//   m2test floorsDeterminism [N]      M4: N 个 runSeed x2 -> 楼层序列逐位相同; 相邻 runSeed 不同
 
 #include "m2_adapter.hpp"
 
@@ -103,6 +106,66 @@ int main(int argc, char** argv) {
         std::cout << "start room excluded      : " << excluded << "/" << n << "\n";
         std::cout << "no duplicate cells       : " << noDup << "/" << n << "\n";
         return (identical == n && inRoom == n && excluded == n && noDup == n) ? 0 : 1;
+    }
+
+    if (mode == "floors") {
+        std::uint64_t runSeed = (argc > 2) ? std::strtoull(argv[2], nullptr, 10) : 7;
+        int n = (argc > 3) ? std::atoi(argv[3]) : 3;
+        const int basePerRoom = 2;          // == CSV EnemiesPerRoom
+        const double baseHP = 30.0;         // == CSV EnemyMaxHP
+        const double scaling = 1.0;         // == CSV PerFloorScaling
+        m2::WorldConfig w200; w200.tileSize = 200;   // UE 默认, 预注册值必须按此计算
+        std::cout << "runSeed=" << runSeed << " floors=" << n
+                  << " basePerRoom=" << basePerRoom << " baseHP=" << baseHP
+                  << " scaling=" << scaling << "\n";
+        for (int f = 1; f <= n; ++f) {
+            std::uint64_t fs = m2::deriveFloorSeed(runSeed, f);
+            Config c; c.seed = fs;
+            Layout L = generate(c);
+            const int effCount = m2::scaledEnemiesPerRoom(basePerRoom, f, scaling);
+            const double effHP = baseHP * m2::floorMultiplier(f, scaling);
+            std::vector<m2::EnemyPlacement> ep = m2::buildEnemyPlan(L, w200, effCount, L.startRoom);
+            std::cout << "floor=" << f
+                      << " seed=" << fs
+                      << std::hex
+                      << " planHash=0x" << m2::spawnPlanHash(L, w200)
+                      << " enemyHash=0x" << m2::enemyPlanHash(ep)
+                      << std::dec
+                      << " effCount=" << effCount
+                      << " effHP=" << effHP
+                      << " enemies=" << ep.size()
+                      << " rooms=" << L.rooms.size() << "\n";
+        }
+        std::cout << "nextRunSeed(" << runSeed << ")=" << m2::nextRunSeed(runSeed) << "\n";
+        return 0;
+    }
+
+    if (mode == "floorsDeterminism") {
+        long n = (argc > 2) ? std::strtol(argv[2], nullptr, 10) : 200;
+        long identical = 0, differs = 0;
+        m2::WorldConfig w200; w200.tileSize = 200;
+        for (long i = 0; i < n; ++i) {
+            std::uint64_t rs = static_cast<std::uint64_t>(1 + i);
+            bool same = true;
+            std::uint64_t firstFloorHashA = 0, firstFloorHashB = 0;
+            for (int f = 1; f <= 3; ++f) {
+                Config a; a.seed = m2::deriveFloorSeed(rs, f);
+                Config b; b.seed = m2::deriveFloorSeed(rs, f);
+                Layout La = generate(a), Lb = generate(b);
+                if (m2::spawnPlanHash(La, w200) != m2::spawnPlanHash(Lb, w200)) same = false;
+                if (m2::enemyPlanHash(m2::buildEnemyPlan(La, w200, 2, La.startRoom)) !=
+                    m2::enemyPlanHash(m2::buildEnemyPlan(Lb, w200, 2, Lb.startRoom))) same = false;
+                if (f == 1) firstFloorHashA = m2::spawnPlanHash(La, w200);
+            }
+            if (same) ++identical;
+            // 反例: 相邻 runSeed 的楼层1布局哈希应不同
+            Config c2; c2.seed = m2::deriveFloorSeed(rs + 1, 1);
+            firstFloorHashB = m2::spawnPlanHash(generate(c2), w200);
+            if (firstFloorHashA != firstFloorHashB) ++differs;
+        }
+        std::cout << "same runSeed => identical floor sequence : " << identical << "/" << n << "\n";
+        std::cout << "adjacent runSeed => different floor 1    : " << differs << "/" << n << "\n";
+        return (identical == n && differs == n) ? 0 : 1;
     }
 
     if (mode == "determinism") {
