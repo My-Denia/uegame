@@ -54,6 +54,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Dungeon")
 	void Build();
 
+	/** Absolute world position of the start room center (valid after Build). */
+	FVector GetStartWorldLocation() const { return StartWorld; }
+
+	/** Absolute world center of the room farthest (2D) from the start room (valid after Build).
+	 *  Used by the Dungeon.WalkFar evidence command. */
+	FVector GetFarthestRoomCenterWorld() const { return FarthestRoomWorld; }
+
 private:
 	void SpawnNavBounds();
 
@@ -74,4 +81,7 @@ private:
 
 	/** Absolute world position of the start room center; written by Build(). */
 	FVector StartWorld = FVector::ZeroVector;
+
+	/** Absolute world center of the room farthest from the start room; written by Build(). */
+	FVector FarthestRoomWorld = FVector::ZeroVector;
 };

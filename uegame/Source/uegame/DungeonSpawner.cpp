@@ -138,6 +138,23 @@ void ADungeonSpawner::Build()
 	m2::startWorldPos(Layout, WC, SX, SY);
 	StartWorld = FVector(static_cast<float>(SX), static_cast<float>(SY), 0.0f);
 
+	// Farthest room center (2D) from the start room, for the WalkFar evidence command.
+	FarthestRoomWorld = StartWorld;
+	float BestDist = -1.0f;
+	for (const dungeon::Room& R : Layout.rooms)
+	{
+		const FVector C(
+			static_cast<float>(WC.originX + static_cast<long long>(R.cx()) * WC.tileSize + WC.tileSize / 2),
+			static_cast<float>(WC.originY + static_cast<long long>(R.cy()) * WC.tileSize + WC.tileSize / 2),
+			0.0f);
+		const float D = FVector::Dist2D(C, StartWorld);
+		if (D > BestDist)
+		{
+			BestDist = D;
+			FarthestRoomWorld = C;
+		}
+	}
+
 	// --- Fidelity log (the programmatic half of acceptance #2) ---
 	const m2::WorldReach WR = m2::worldReachability(Layout, WC);
 	const int32 SpawnedWalkable =
