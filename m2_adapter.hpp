@@ -172,14 +172,29 @@ inline std::vector<EnemyPlacement> buildEnemyPlan(const dungeon::Layout& L,
         for (int k = 0; k < countForRoom; ++k) {
             int gx = 0, gy = 0;
             bool unique = false;
-            // 命中已占格则重抽 (重抽同样消耗 rng, 保持确定性)。重抽预算耗尽仍未
-            // 找到空格时跳过该布点 (宁缺毋重复), 保证计划内永无重复格。
+            // 快路径: 命中已占格则重抽 (重抽同样消耗 rng, 保持确定性)。
             for (int attempt = 0; attempt < 64 && !unique; ++attempt) {
                 gx = rm.x + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.w));
                 gy = rm.y + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.h));
                 unique = usedCells.insert({ gx, gy }).second;
             }
-            if (!unique) continue;
+            if (!unique) {
+                // 兜底 (房间接近占满时): 从剩余空格中按 rng 序号精确选取, 保证恰好
+                // 产出 countForRoom 个布点 (k < countForRoom <= maxUnique => 必有空格)。
+                const int freeCount = maxUnique - static_cast<int>(usedCells.size());
+                int pick = static_cast<int>(rng() % static_cast<std::uint64_t>(freeCount));
+                for (int yy = rm.y; yy < rm.y + rm.h && !unique; ++yy) {
+                    for (int xx = rm.x; xx < rm.x + rm.w && !unique; ++xx) {
+                        if (usedCells.count({ xx, yy }) != 0) continue;
+                        if (pick-- == 0) {
+                            gx = xx;
+                            gy = yy;
+                            usedCells.insert({ gx, gy });
+                            unique = true;
+                        }
+                    }
+                }
+            }
             EnemyPlacement p;
             p.roomIndex = r;
             p.gx = gx;

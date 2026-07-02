@@ -48,9 +48,18 @@ int main(int argc, char** argv) {
         Layout L = generate(c);
         std::vector<m2::EnemyPlacement> plan =
             m2::buildEnemyPlan(L, wc, perRoom, L.startRoom);
+        long expected = 0;
+        for (int r = 0; r < static_cast<int>(L.rooms.size()); ++r) {
+            if (r == L.startRoom) continue;
+            expected += std::min(perRoom, L.rooms[static_cast<std::size_t>(r)].w *
+                                          L.rooms[static_cast<std::size_t>(r)].h);
+        }
         std::cout << "seed=" << seed << " perRoom=" << perRoom
                   << " rooms=" << L.rooms.size() << " startRoom=" << L.startRoom
-                  << " enemies=" << plan.size() << "\n";
+                  << " enemies=" << plan.size()
+                  << " expected=" << expected
+                  << (static_cast<long>(plan.size()) == expected ? " (exact)" : " (MISMATCH)")
+                  << "\n";
         for (const m2::EnemyPlacement& p : plan) {
             std::cout << "  room=" << p.roomIndex << " cell=(" << p.gx << "," << p.gy
                       << ") world=(" << p.wx << "," << p.wy << ")\n";

@@ -44,6 +44,13 @@ void DungeonSpawnCmd(const TArray<FString>& Args, UWorld* World)
 	{
 		return;
 	}
+	if (!World->IsGameWorld())
+	{
+		// Without this guard the MCP bridge (which falls back to the editor world when
+		// PIE is not active) would spawn the dungeon INTO the editor level and dirty it.
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] Dungeon.Spawn is PIE/game-world only; start PIE first"));
+		return;
+	}
 	if (FindSpawner(World))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DungeonEvidence] a DungeonSpawner already exists in %s; not spawning another"), *World->GetName());
