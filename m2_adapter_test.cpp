@@ -7,15 +7,19 @@
 //   m2test determinism [seed] 同种子两次 spawn-plan 哈希对比
 //   m2test enemies [seed] [perRoom]   M3: 打印敌人布点 + tile 无关哈希 (排除起始房)
 //   m2test enemyDeterminism [N]       M3: N 个种子 x2 生成，哈希/布点全等 + 房内校验
-//   m2test floors [runSeed] [n]       M4: 楼层 1..n 的种子/布局哈希(tile200)/敌人哈希/缩放值
-//                                     —— PIE 验证前预注册的 g++ 参考值
+//   m2test floors [runSeed] [n] [--csv <CombatConfig.csv>]
+//                                     M4: 楼层 1..n 的种子/布局哈希(tile200)/敌人哈希/缩放值
+//                                     —— PIE 验证前预注册的 g++ 参考值; --csv 直接读数据表,
+//                                     避免改表后参考值悄悄基于旧配置
 //   m2test floorsDeterminism [N]      M4: N 个 runSeed x2 -> 楼层序列逐位相同; 相邻 runSeed 不同
 
 #include "m2_adapter.hpp"
 
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 using namespace dungeon;
@@ -109,15 +113,53 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "floors") {
-        std::uint64_t runSeed = (argc > 2) ? std::strtoull(argv[2], nullptr, 10) : 7;
-        int n = (argc > 3) ? std::atoi(argv[3]) : 3;
-        const int basePerRoom = 2;          // == CSV EnemiesPerRoom
-        const double baseHP = 30.0;         // == CSV EnemyMaxHP
-        const double scaling = 1.0;         // == CSV PerFloorScaling
+        std::uint64_t runSeed = (argc > 2 && argv[2][0] != '-') ? std::strtoull(argv[2], nullptr, 10) : 7;
+        int n = (argc > 3 && argv[3][0] != '-') ? std::atoi(argv[3]) : 3;
+        // 基准值:默认常量必须等于提交时的 CSV;--csv <path> 则直接读数据表 Default 行,
+        // 这样改表后预注册参考值随表移动,不会悄悄基于旧配置 (布点数量变 -> 哈希变)。
+        int basePerRoom = 2;                // == CSV EnemiesPerRoom
+        double baseHP = 30.0;               // == CSV EnemyMaxHP
+        double scaling = 1.0;               // == CSV PerFloorScaling
+        std::string cfgSrc = "built-in-defaults";
+        for (int a = 2; a < argc - 1; ++a) {
+            if (std::string(argv[a]) != "--csv") continue;
+            const char* path = argv[a + 1];
+            std::ifstream in(path);
+            if (!in) { std::cerr << "cannot open CSV: " << path << "\n"; return 2; }
+            std::string header, row, line;
+            while (std::getline(in, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (header.empty()) { header = line; continue; }
+                if (line.rfind("Default,", 0) == 0) { row = line; break; }
+            }
+            if (header.empty() || row.empty()) {
+                std::cerr << "CSV missing header/Default row: " << path << "\n"; return 2;
+            }
+            auto split = [](const std::string& s) {
+                std::vector<std::string> out; std::string cell; std::stringstream ss(s);
+                while (std::getline(ss, cell, ',')) out.push_back(cell);
+                return out;
+            };
+            const std::vector<std::string> hs = split(header), vs = split(row);
+            auto col = [&hs](const char* name) -> int {
+                for (std::size_t i = 0; i < hs.size(); ++i) if (hs[i] == name) return static_cast<int>(i);
+                return -1;
+            };
+            const int cPerRoom = col("EnemiesPerRoom"), cHP = col("EnemyMaxHP"), cScal = col("PerFloorScaling");
+            if (cPerRoom < 0 || cHP < 0 || cScal < 0 ||
+                cPerRoom >= static_cast<int>(vs.size()) || cHP >= static_cast<int>(vs.size()) ||
+                cScal >= static_cast<int>(vs.size())) {
+                std::cerr << "CSV missing EnemiesPerRoom/EnemyMaxHP/PerFloorScaling: " << path << "\n"; return 2;
+            }
+            basePerRoom = std::atoi(vs[cPerRoom].c_str());
+            baseHP = std::atof(vs[cHP].c_str());
+            scaling = std::atof(vs[cScal].c_str());
+            cfgSrc = std::string("csv(") + path + ")";
+        }
         m2::WorldConfig w200; w200.tileSize = 200;   // UE 默认, 预注册值必须按此计算
         std::cout << "runSeed=" << runSeed << " floors=" << n
                   << " basePerRoom=" << basePerRoom << " baseHP=" << baseHP
-                  << " scaling=" << scaling << "\n";
+                  << " scaling=" << scaling << " config=" << cfgSrc << "\n";
         for (int f = 1; f <= n; ++f) {
             std::uint64_t fs = m2::deriveFloorSeed(runSeed, f);
             Config c; c.seed = fs;
