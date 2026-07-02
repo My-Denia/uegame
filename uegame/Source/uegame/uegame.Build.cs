@@ -25,20 +25,7 @@ public class uegame : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[] { });
 
 		PublicIncludePaths.AddRange(new string[] {
-			"uegame",
-			"uegame/Variant_Platforming",
-			"uegame/Variant_Platforming/Animation",
-			"uegame/Variant_Combat",
-			"uegame/Variant_Combat/AI",
-			"uegame/Variant_Combat/Animation",
-			"uegame/Variant_Combat/Gameplay",
-			"uegame/Variant_Combat/Interfaces",
-			"uegame/Variant_Combat/UI",
-			"uegame/Variant_SideScrolling",
-			"uegame/Variant_SideScrolling/AI",
-			"uegame/Variant_SideScrolling/Gameplay",
-			"uegame/Variant_SideScrolling/Interfaces",
-			"uegame/Variant_SideScrolling/UI"
+			"uegame"
 		});
 
 		// M1/M2 engine-agnostic headers (dungeon.hpp, m2_adapter.hpp) live at the repo root
