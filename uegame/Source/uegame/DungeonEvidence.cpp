@@ -298,6 +298,47 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonTeleportToRoomCmd(
 	TEXT("Teleport the player to a room center: Dungeon.TeleportToRoom <roomIndex>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonTeleportToRoomCmd));
 
+void DungeonFaceNearestCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (!Player)
+	{
+		return;
+	}
+	ADungeonEnemy* Nearest = nullptr;
+	float NearestDist = TNumericLimits<float>::Max();
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		const float D = FVector::Dist2D((*It)->GetActorLocation(), Player->GetActorLocation());
+		if (D < NearestDist)
+		{
+			NearestDist = D;
+			Nearest = *It;
+		}
+	}
+	if (!Nearest)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] FaceNearest: no enemies"));
+		return;
+	}
+	// The melee sweep is front-offset; forensic runs cannot steer the pawn, so rotate it
+	// (attack uses the PAWN's forward vector).
+	const FVector Dir = Nearest->GetActorLocation() - Player->GetActorLocation();
+	const FRotator Face(0.0f, Dir.Rotation().Yaw, 0.0f);
+	Player->SetActorRotation(Face);
+	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] FaceNearest: yaw=%.0f dist=%.0f room=%d"),
+		Face.Yaw, NearestDist, Nearest->GetRoomIndex());
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFaceNearestCmd(
+	TEXT("Dungeon.FaceNearest"),
+	TEXT("Rotate the player pawn to face the nearest enemy (forensic aid for the melee sweep)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFaceNearestCmd));
+
 #endif // !UE_BUILD_SHIPPING
 
 } // namespace
