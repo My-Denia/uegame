@@ -10,6 +10,7 @@
 #include "AI/Navigation/NavigationDirtyArea.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
+#include "Combat/DungeonStairs.h"
 #include "Components/BoxComponent.h"
 #include "Components/BrushComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -97,6 +98,11 @@ void ADungeonSpawner::BeginPlay()
 		{
 			SpawnEnemies();
 		}
+	}
+
+	if (UWorld* World = GetWorld(); World && World->IsGameWorld())
+	{
+		SpawnStairs();   // M4: descend trigger in the farthest room
 	}
 }
 
@@ -239,6 +245,7 @@ void ADungeonSpawner::Build()
 	StartRoomIndex = Layout.startRoom;
 	RoomCentersWorld.Reset();
 	FarthestRoomWorld = StartWorld;
+	FarthestRoomIndex = StartRoomIndex;
 	float BestDist = -1.0f;
 	for (const dungeon::Room& R : Layout.rooms)
 	{
@@ -252,6 +259,7 @@ void ADungeonSpawner::Build()
 		{
 			BestDist = D;
 			FarthestRoomWorld = C;
+			FarthestRoomIndex = RoomCentersWorld.Num() - 1;
 		}
 	}
 
@@ -340,6 +348,36 @@ void ADungeonSpawner::SpawnNavBounds()
 		VolBounds.GetSize().X, VolBounds.GetSize().Y, VolBounds.GetSize().Z);
 }
 
+void ADungeonSpawner::SpawnStairs()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		return;
+	}
+
+	// One pad per floor: drop the previous floor's stairs first.
+	for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+
+	const FVector Loc = FarthestRoomWorld + FVector(0.0f, 0.0f, 100.0f);
+	ADungeonStairs* Stairs = World->SpawnActor<ADungeonStairs>(ADungeonStairs::StaticClass(), Loc, FRotator::ZeroRotator);
+	if (!Stairs)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Stairs] spawn failed"));
+		return;
+	}
+
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	// Evidence: active gate policy logged at spawn (config flag, DataTable-driven).
+	UE_LOG(LogTemp, Display,
+		TEXT("[Stairs] spawned in farthest room=%d at (%.0f, %.0f) policy=%s"),
+		FarthestRoomIndex, Loc.X, Loc.Y,
+		Cfg.bRequireFloorClearToDescend ? TEXT("require-floor-clear") : TEXT("descend-anytime"));
+}
+
 void ADungeonSpawner::RefreshNavigation()
 {
 	UWorld* World = GetWorld();
@@ -394,6 +432,7 @@ void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 	{
 		SpawnEnemies(InEnemiesPerRoomOverride, InEnemyHPOverride);
 	}
+	SpawnStairs();           // M4: fresh descend trigger in the new farthest room
 
 	UE_LOG(LogTemp, Display,
 		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d (in-place, world+navsystem kept alive)"),

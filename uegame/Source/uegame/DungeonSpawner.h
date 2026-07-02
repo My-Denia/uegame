@@ -102,8 +102,23 @@ public:
 	}
 	int32 GetStartRoomIndex() const { return StartRoomIndex; }
 
+	/** M4: true when every room that started with enemies has zero alive. */
+	bool AreAllRoomsCleared() const
+	{
+		for (int32 i = 0; i < RoomInitialCounts.Num(); ++i)
+		{
+			if (RoomInitialCounts[i] > 0 && RoomAliveCounts.IsValidIndex(i) && RoomAliveCounts[i] > 0)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 private:
 	void SpawnNavBounds();
+	/** M4: (re)spawn the descend stairs in the farthest room (destroys the previous pad). */
+	void SpawnStairs();
 	/** Spawn the deterministic enemy plan. Overrides (<0 = use DataTable base values)
 	 *  let RegenerateFloor apply the M4 per-floor scaling. */
 	void SpawnEnemies(int32 InEnemiesPerRoomOverride = -1, float InEnemyHPOverride = -1.0f);
@@ -139,6 +154,7 @@ private:
 	/** All room centers in world coords (index == M1 room index); written by Build(). */
 	TArray<FVector> RoomCentersWorld;
 	int32 StartRoomIndex = 0;
+	int32 FarthestRoomIndex = 0;
 
 	/** M3 per-room enemy bookkeeping; written by SpawnEnemies(). */
 	TArray<int32> RoomAliveCounts;

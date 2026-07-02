@@ -45,7 +45,20 @@ struct FCombatConfigRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn")
 	int32 EnemiesPerRoom = 2;
 
-	/** RESERVED for M4 per-floor difficulty scaling. Defined per contract; NOT applied in M3. */
+	/** M4 per-floor difficulty scaling (linear): multiplier(N) = 1 + (N-1) * PerFloorScaling,
+	 *  applied to enemy count (rounded) and enemy MaxHP. Floor 1 is always base values. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Scaling")
 	float PerFloorScaling = 1.0f;
+
+	// --- M4 run loop ---
+
+	/** Descend gate policy: false = descend-anytime (v1 default: pacing and player agency;
+	 *  clearing rooms stays an optional challenge, not a hard gate), true = stairs refuse
+	 *  until every enemy room on the floor is cleared. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run")
+	bool bRequireFloorClearToDescend = false;
+
+	/** Descending past this floor wins the run. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run")
+	int32 MaxFloors = 3;
 };

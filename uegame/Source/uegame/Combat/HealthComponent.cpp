@@ -35,3 +35,24 @@ void UHealthComponent::TakeDamage(float Amount, AActor* DamageInstigator)
 		OnDeath.Broadcast(GetOwner());
 	}
 }
+
+void UHealthComponent::SetHP(float NewHP)
+{
+	const float OldHP = CurrentHP;
+	CurrentHP = FMath::Clamp(NewHP, 0.0f, MaxHP);
+	UE_LOG(LogTemp, Display, TEXT("[Combat] %s SetHP %.0f -> %.0f (forensic/managed)"),
+		*GetNameSafe(GetOwner()), OldHP, CurrentHP);
+	if (CurrentHP <= 0.0f && !bDead)
+	{
+		bDead = true;
+		OnDeath.Broadcast(GetOwner());
+	}
+}
+
+void UHealthComponent::Revive(float NewHP)
+{
+	bDead = false;
+	CurrentHP = (NewHP < 0.0f) ? MaxHP : FMath::Clamp(NewHP, 1.0f, MaxHP);
+	UE_LOG(LogTemp, Display, TEXT("[Combat] %s revived, HP=%.0f/%.0f"),
+		*GetNameSafe(GetOwner()), CurrentHP, MaxHP);
+}
