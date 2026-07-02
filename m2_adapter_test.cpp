@@ -10,7 +10,8 @@
 //   m2test floors [runSeed] [n] [--csv <CombatConfig.csv>]
 //                                     M4: 楼层 1..n 的种子/布局哈希(tile200)/敌人哈希/缩放值
 //                                     —— PIE 验证前预注册的 g++ 参考值; --csv 直接读数据表,
-//                                     避免改表后参考值悄悄基于旧配置
+//                                     避免改表后参考值悄悄基于旧配置; 未显式给 n 时
+//                                     n 默认取表内 MaxFloors (与 FloorManager 的判赢层数对齐)
 //   m2test floorsDeterminism [N]      M4: N 个 runSeed x2 -> 楼层序列逐位相同; 相邻 runSeed 不同
 
 #include "m2_adapter.hpp"
@@ -115,6 +116,7 @@ int main(int argc, char** argv) {
     if (mode == "floors") {
         std::uint64_t runSeed = 7;
         int n = 3;
+        bool nExplicit = false;
         // 基准值:默认常量必须等于提交时的 CSV;--csv <path> 则直接读数据表 Default 行,
         // 这样改表后预注册参考值随表移动,不会悄悄基于旧配置 (布点数量变 -> 哈希变)。
         int basePerRoom = 2;                // == CSV EnemiesPerRoom
@@ -127,7 +129,7 @@ int main(int argc, char** argv) {
         for (int a = 2; a < argc; ++a) {
             if (std::string(argv[a]) != "--csv") {
                 if (positional == 0) runSeed = std::strtoull(argv[a], nullptr, 10);
-                else if (positional == 1) n = std::atoi(argv[a]);
+                else if (positional == 1) { n = std::atoi(argv[a]); nExplicit = true; }
                 ++positional;
                 continue;
             }
@@ -139,14 +141,28 @@ int main(int argc, char** argv) {
             while (std::getline(in, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 if (header.empty()) { header = line; continue; }
-                if (line.rfind("Default,", 0) == 0) { row = line; break; }
+                // 行名单元格也可能被表格软件加引号: 两种前缀都算 Default 行。
+                if (line.rfind("Default,", 0) == 0 || line.rfind("\"Default\",", 0) == 0) { row = line; break; }
             }
             if (header.empty() || row.empty()) {
                 std::cerr << "CSV missing header/Default row: " << path << "\n"; return 2;
             }
             auto split = [](const std::string& s) {
                 std::vector<std::string> out; std::string cell; std::stringstream ss(s);
-                while (std::getline(ss, cell, ',')) out.push_back(cell);
+                while (std::getline(ss, cell, ',')) {
+                    // 表格软件可能给单元格加引号 ("2"): 去外层引号并还原 "" 转义,
+                    // 否则 atoi/atof 读到引号得 0, 参考值悄悄归零。
+                    if (cell.size() >= 2 && cell.front() == '"' && cell.back() == '"') {
+                        cell = cell.substr(1, cell.size() - 2);
+                        std::string un; un.reserve(cell.size());
+                        for (std::size_t i = 0; i < cell.size(); ++i) {
+                            if (cell[i] == '"' && i + 1 < cell.size() && cell[i + 1] == '"') { un += '"'; ++i; }
+                            else { un += cell[i]; }
+                        }
+                        cell = un;
+                    }
+                    out.push_back(cell);
+                }
                 return out;
             };
             const std::vector<std::string> hs = split(header), vs = split(row);
@@ -163,6 +179,12 @@ int main(int argc, char** argv) {
             basePerRoom = std::atoi(vs[cPerRoom].c_str());
             baseHP = std::atof(vs[cHP].c_str());
             scaling = std::atof(vs[cScal].c_str());
+            // 未显式给 n 时楼层数跟随表内 MaxFloors (FloorManager 用它判赢),
+            // 避免表改成 5 层后这里还只预注册 1..3。
+            const int cMax = col("MaxFloors");
+            if (!nExplicit && cMax >= 0 && cMax < static_cast<int>(vs.size())) {
+                n = std::atoi(vs[cMax].c_str());
+            }
             cfgSrc = std::string("csv(") + path + ")";
         }
         if (n <= 0) { std::cerr << "floor count must be >= 1 (got " << n << ")\n"; return 2; }

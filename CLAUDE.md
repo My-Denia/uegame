@@ -6,7 +6,8 @@
 
 - `dungeon.hpp` 是 M1 引擎无关核心,契约禁改(tag `m1-baseline`)。适配层是 `m2_adapter.hpp`,UE 只在 .cpp 里 include 它,绝不进反射头文件。
 - 确定性纪律 = 预注册:任何影响生成/种子/布点的改动,先用 WSL g++ 预测,再进 UE PIE 验证,两边输出逐位相等才算过。预注册值以命令输出为准,不在文档里复制哈希(避免二重 pin);`--csv` 让参考值直接跟随当前数据表(改表后布点数量会变、敌人哈希随之移动,别用工具内置默认值对新表做预测):
-  `wsl -e bash -c "g++ -std=c++17 -O2 m2_adapter_test.cpp -o /tmp/m2t && /tmp/m2t floors <runSeed> 3 --csv uegame/Content/Data/CombatConfig.csv"`
+  `wsl -e bash -c "g++ -std=c++17 -O2 m2_adapter_test.cpp -o /tmp/m2t && /tmp/m2t floors <runSeed> --csv uegame/Content/Data/CombatConfig.csv"`
+  (楼层数默认取表内 MaxFloors,与 FloorManager 判赢层数对齐;取证需要更多层可显式传 n。)
 - 战斗数值唯一来源 `uegame/Content/Data/CombatConfig.csv`。加载器是进程级 LoadOnce 缓存——改 CSV 必须重启编辑器才生效,PIE 重开没用。
 - 地图 `Lvl_ThirdPerson` 里没有摆 DungeonSpawner:运行时由 FloorManager 自举(无 spawner 时用默认种子 7)或 `Dungeon.StartRun` 动态生成。不要按"关卡里有 spawner"的直觉推理。
 - 更深的导航/runtime navmesh 细节见 `m2_ue/M2_UE_README.md`。
