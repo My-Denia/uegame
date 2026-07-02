@@ -3,6 +3,9 @@
 #include "uegameCharacter.h"
 #include "Engine/LocalPlayer.h"
 #include "Camera/CameraComponent.h"
+#include "Combat/CombatComponent.h"
+#include "Combat/CombatConfig.h"
+#include "Combat/HealthComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -10,6 +13,8 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "Kismet/GameplayStatics.h"
+#include "TimerManager.h"
 #include "uegame.h"
 
 AuegameCharacter::AuegameCharacter()
@@ -46,8 +51,41 @@ AuegameCharacter::AuegameCharacter()
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
 
-	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
+	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character)
 	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
+
+	// M3 combat: shared health + the single melee attack (numbers from the DataTable row).
+	Health = CreateDefaultSubobject<UHealthComponent>(TEXT("Health"));
+	Combat = CreateDefaultSubobject<UCombatComponent>(TEXT("Combat"));
+}
+
+void AuegameCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	Health->Init(Cfg.PlayerMaxHP);
+	Health->OnDeath.AddDynamic(this, &AuegameCharacter::HandlePlayerDeath);
+}
+
+void AuegameCharacter::DoAttack()
+{
+	if (Combat)
+	{
+		Combat->TryAttack();
+	}
+}
+
+void AuegameCharacter::HandlePlayerDeath(AActor* /*DeadActor*/)
+{
+	// Evidence (acceptance D fail-state): death log + level restart.
+	UE_LOG(LogTemp, Display, TEXT("[PlayerDeath] player HP reached 0 - restarting level in 1s"));
+	GetWorldTimerManager().SetTimer(RestartTimerHandle,
+		FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			UGameplayStatics::OpenLevel(this, FName(*UGameplayStatics::GetCurrentLevelName(this)));
+		}),
+		1.0f, false);
 }
 
 void AuegameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -65,6 +103,10 @@ void AuegameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AuegameCharacter::Look);
+
+		// M3 melee attack: legacy key bind (F) - coexists with EnhancedInput; the
+		// Dungeon.Attack evidence verb drives the same DoAttack path.
+		PlayerInputComponent->BindKey(EKeys::F, IE_Pressed, this, &AuegameCharacter::DoAttack);
 	}
 	else
 	{

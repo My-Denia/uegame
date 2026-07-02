@@ -49,6 +49,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
 	bool bTeleportPlayerToStart = true;
 
+	/** M3: spawn enemies from the deterministic enemy plan at BeginPlay (game worlds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
+	bool bSpawnEnemies = true;
+
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 
@@ -63,8 +67,29 @@ public:
 	 *  Used by the Dungeon.WalkFar evidence command. */
 	FVector GetFarthestRoomCenterWorld() const { return FarthestRoomWorld; }
 
+	// --- M3 room-clear tracking (evidence surface) ---
+
+	/** Enemy death callback; logs [RoomClear] when a room's alive count reaches zero. */
+	void NotifyEnemyDead(int32 InRoomIndex);
+
+	int32 GetRoomCount() const { return RoomCentersWorld.Num(); }
+	FVector GetRoomCenterWorld(int32 InRoomIndex) const
+	{
+		return RoomCentersWorld.IsValidIndex(InRoomIndex) ? RoomCentersWorld[InRoomIndex] : FVector::ZeroVector;
+	}
+	int32 GetAliveInRoom(int32 InRoomIndex) const
+	{
+		return RoomAliveCounts.IsValidIndex(InRoomIndex) ? RoomAliveCounts[InRoomIndex] : 0;
+	}
+	int32 GetInitialInRoom(int32 InRoomIndex) const
+	{
+		return RoomInitialCounts.IsValidIndex(InRoomIndex) ? RoomInitialCounts[InRoomIndex] : 0;
+	}
+	int32 GetStartRoomIndex() const { return StartRoomIndex; }
+
 private:
 	void SpawnNavBounds();
+	void SpawnEnemies();
 
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<USceneComponent> Root;
@@ -86,4 +111,12 @@ private:
 
 	/** Absolute world center of the room farthest from the start room; written by Build(). */
 	FVector FarthestRoomWorld = FVector::ZeroVector;
+
+	/** All room centers in world coords (index == M1 room index); written by Build(). */
+	TArray<FVector> RoomCentersWorld;
+	int32 StartRoomIndex = 0;
+
+	/** M3 per-room enemy bookkeeping; written by SpawnEnemies(). */
+	TArray<int32> RoomAliveCounts;
+	TArray<int32> RoomInitialCounts;
 };

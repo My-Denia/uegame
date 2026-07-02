@@ -13,6 +13,9 @@
 
 #include "DungeonSpawner.h"
 
+#include "Combat/CombatComponent.h"
+#include "Combat/DungeonEnemy.h"
+#include "Combat/HealthComponent.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
@@ -152,5 +155,149 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonWalkFarCmd(
 	TEXT("Dungeon.WalkFar"),
 	TEXT("Nav-path check + walk the player to the farthest room of the spawned dungeon"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonWalkFarCmd));
+
+#if !UE_BUILD_SHIPPING
+// ---------------------------------------------------------------------------
+// M3 forensic verbs - test/evidence only, compiled out of shipping builds.
+// ---------------------------------------------------------------------------
+
+void DungeonCombatStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	const UHealthComponent* PlayerHP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
+
+	float NearestDist = -1.0f;
+	int32 EnemyCount = 0;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		++EnemyCount;
+		if (Player)
+		{
+			const float D = FVector::Dist2D((*It)->GetActorLocation(), Player->GetActorLocation());
+			if (NearestDist < 0.0f || D < NearestDist)
+			{
+				NearestDist = D;
+			}
+		}
+	}
+
+	FString Rooms;
+	if (ADungeonSpawner* Spawner = FindSpawner(World))
+	{
+		for (int32 i = 0; i < Spawner->GetRoomCount(); ++i)
+		{
+			Rooms += FString::Printf(TEXT(" r%d=%d/%d"), i,
+				Spawner->GetAliveInRoom(i), Spawner->GetInitialInRoom(i));
+		}
+	}
+
+	// Evidence snapshot: player HP, nearest-enemy distance, per-room alive/initial.
+	UE_LOG(LogTemp, Display,
+		TEXT("[CombatStatus] playerHP=%.0f/%.0f enemies=%d nearestDist=%.0f | alive/initial:%s"),
+		PlayerHP ? PlayerHP->GetHP() : -1.0f, PlayerHP ? PlayerHP->GetMaxHP() : -1.0f,
+		EnemyCount, NearestDist, *Rooms);
+}
+
+void DungeonAttackCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	UCombatComponent* Combat = Player ? Player->FindComponentByClass<UCombatComponent>() : nullptr;
+	if (!Combat)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] no CombatComponent on player pawn"));
+		return;
+	}
+	Combat->TryAttack();
+}
+
+void DungeonKillNearestCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (!Player)
+	{
+		return;
+	}
+	ADungeonEnemy* Nearest = nullptr;
+	float NearestDist = TNumericLimits<float>::Max();
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		const float D = FVector::Dist2D((*It)->GetActorLocation(), Player->GetActorLocation());
+		if (D < NearestDist)
+		{
+			NearestDist = D;
+			Nearest = *It;
+		}
+	}
+	if (!Nearest)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] KillNearest: no enemies left"));
+		return;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] KillNearest: room=%d dist=%.0f (test-only cheat)"),
+		Nearest->GetRoomIndex(), NearestDist);
+	if (UHealthComponent* HP = Nearest->FindComponentByClass<UHealthComponent>())
+	{
+		HP->TakeDamage(99999.0f, Player);
+	}
+}
+
+void DungeonTeleportToRoomCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.TeleportToRoom <roomIndex>"));
+		return;
+	}
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (!Spawner || !Player)
+	{
+		return;
+	}
+	const int32 Idx = FCString::Atoi(*Args[0]);
+	if (Idx < 0 || Idx >= Spawner->GetRoomCount())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] room index %d out of range (rooms=%d)"),
+			Idx, Spawner->GetRoomCount());
+		return;
+	}
+	Player->SetActorLocation(Spawner->GetRoomCenterWorld(Idx) + FVector(0.0f, 0.0f, 100.0f));
+	// Evidence: teleport target logged so RoomCleared's index can be asserted against it.
+	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] teleported player to room=%d"), Idx);
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonCombatStatusCmd(
+	TEXT("Dungeon.CombatStatus"),
+	TEXT("Log player HP, enemy count, nearest-enemy distance, per-room alive/initial counts"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonCombatStatusCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonAttackCmd(
+	TEXT("Dungeon.Attack"),
+	TEXT("Trigger the player's melee attack (same path as the F key)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonAttackCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonKillNearestCmd(
+	TEXT("Dungeon.KillNearest"),
+	TEXT("Test-only cheat: apply lethal damage to the enemy nearest the player"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonKillNearestCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonTeleportToRoomCmd(
+	TEXT("Dungeon.TeleportToRoom"),
+	TEXT("Teleport the player to a room center: Dungeon.TeleportToRoom <roomIndex>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonTeleportToRoomCmd));
+
+#endif // !UE_BUILD_SHIPPING
 
 } // namespace

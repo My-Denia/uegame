@@ -8,6 +8,8 @@
 #include "DungeonSpawner.h"
 
 #include "AI/Navigation/NavigationDirtyArea.h"
+#include "Combat/CombatConfig.h"
+#include "Combat/DungeonEnemy.h"
 #include "Components/BoxComponent.h"
 #include "Components/BrushComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -87,6 +89,87 @@ void ADungeonSpawner::BeginPlay()
 			Pawn->SetActorLocation(StartWorld + FVector(0.0f, 0.0f, 100.0f));
 		}
 	}
+
+	if (bSpawnEnemies)
+	{
+		if (UWorld* World = GetWorld(); World && World->IsGameWorld())
+		{
+			SpawnEnemies();
+		}
+	}
+}
+
+void ADungeonSpawner::SpawnEnemies()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();   // echoes the row once (evidence)
+
+	// Same deterministic pipeline as the geometry: regenerate the layout for this seed
+	// and derive placements from the seeded sub-stream. Start room excluded (deliberate
+	// contract deviation, surfaced at GATE 1): the player spawns there un-ambushed, and
+	// rooms with zero initial enemies never fire RoomCleared.
+	dungeon::Config DCfg;
+	DCfg.seed = static_cast<std::uint64_t>(Seed);
+	const dungeon::Layout Layout = dungeon::generate(DCfg);
+
+	m2::WorldConfig WC;
+	WC.tileSize   = static_cast<long long>(TileSize);
+	WC.wallHeight = static_cast<long long>(WallHeight);
+	const std::vector<m2::EnemyPlacement> Plan =
+		m2::buildEnemyPlan(Layout, WC, Cfg.EnemiesPerRoom, Layout.startRoom);
+
+	RoomAliveCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
+	RoomInitialCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
+
+	int32 Spawned = 0;
+	for (const m2::EnemyPlacement& P : Plan)
+	{
+		const FVector Loc(static_cast<float>(P.wx), static_cast<float>(P.wy), 100.0f);
+		ADungeonEnemy* Enemy = World->SpawnActorDeferred<ADungeonEnemy>(
+			ADungeonEnemy::StaticClass(), FTransform(Loc), nullptr, nullptr,
+			ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn);
+		if (!Enemy)
+		{
+			continue;
+		}
+		Enemy->InitEnemy(Cfg, P.roomIndex, this);
+		Enemy->FinishSpawning(FTransform(Loc));
+		++RoomAliveCounts[P.roomIndex];
+		++RoomInitialCounts[P.roomIndex];
+		++Spawned;
+	}
+
+	// Evidence (acceptance B): deterministic enemy plan - tile-invariant hash must equal
+	// the g++ value for the same seed and reproduce across PIE sessions.
+	UE_LOG(LogTemp, Display,
+		TEXT("[Dungeon] enemyPlan seed=%d perRoom=%d enemies=%d spawned=%d startRoomExcluded=%d hash=0x%llx"),
+		Seed, Cfg.EnemiesPerRoom, static_cast<int32>(Plan.size()), Spawned,
+		StartRoomIndex,
+		static_cast<unsigned long long>(m2::enemyPlanHash(Plan)));
+}
+
+void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
+{
+	if (!RoomAliveCounts.IsValidIndex(InRoomIndex))
+	{
+		return;
+	}
+	RoomAliveCounts[InRoomIndex] = FMath::Max(0, RoomAliveCounts[InRoomIndex] - 1);
+	UE_LOG(LogTemp, Display, TEXT("[Combat] enemy down in room=%d, alive=%d"),
+		InRoomIndex, RoomAliveCounts[InRoomIndex]);
+
+	// Rooms that never had enemies (e.g. the start room) never fire RoomCleared.
+	if (RoomAliveCounts[InRoomIndex] == 0 && RoomInitialCounts[InRoomIndex] > 0)
+	{
+		// Evidence (acceptance E).
+		UE_LOG(LogTemp, Display, TEXT("[RoomClear] room=%d cleared (initial=%d)"),
+			InRoomIndex, RoomInitialCounts[InRoomIndex]);
+	}
 }
 
 void ADungeonSpawner::Build()
@@ -140,7 +223,10 @@ void ADungeonSpawner::Build()
 	m2::startWorldPos(Layout, WC, SX, SY);
 	StartWorld = FVector(static_cast<float>(SX), static_cast<float>(SY), 0.0f);
 
-	// Farthest room center (2D) from the start room, for the WalkFar evidence command.
+	// All room centers in world coords (M3 room-clear / teleport verbs) + farthest room
+	// (2D from start) for the WalkFar evidence command.
+	StartRoomIndex = Layout.startRoom;
+	RoomCentersWorld.Reset();
 	FarthestRoomWorld = StartWorld;
 	float BestDist = -1.0f;
 	for (const dungeon::Room& R : Layout.rooms)
@@ -149,6 +235,7 @@ void ADungeonSpawner::Build()
 			static_cast<float>(WC.originX + static_cast<long long>(R.cx()) * WC.tileSize + WC.tileSize / 2),
 			static_cast<float>(WC.originY + static_cast<long long>(R.cy()) * WC.tileSize + WC.tileSize / 2),
 			0.0f);
+		RoomCentersWorld.Add(C);
 		const float D = FVector::Dist2D(C, StartWorld);
 		if (D > BestDist)
 		{

@@ -10,6 +10,8 @@
 class USpringArmComponent;
 class UCameraComponent;
 class UInputAction;
+class UHealthComponent;
+class UCombatComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -49,6 +51,16 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Input")
 	UInputAction* MouseLookAction;
 
+	// --- M3 combat (data-driven; numbers from Content/Data/CombatConfig.csv) ---
+
+	/** Shared HP component (same class the enemy uses). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	UHealthComponent* Health;
+
+	/** The single M3 melee attack (cooldown + range from the DataTable row). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	UCombatComponent* Combat;
+
 public:
 
 	/** Constructor */
@@ -84,6 +96,23 @@ public:
 	/** Handles jump pressed inputs from either controls or UI interfaces */
 	UFUNCTION(BlueprintCallable, Category="Input")
 	virtual void DoJumpEnd();
+
+	/** M3: perform the melee attack (also driven by the Dungeon.Attack evidence verb). */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	virtual void DoAttack();
+
+protected:
+
+	/** Init HP from the combat DataTable row; bind death handling. */
+	virtual void BeginPlay() override;
+
+	/** M3 fail state: log + restart the level shortly after death. */
+	UFUNCTION()
+	void HandlePlayerDeath(AActor* DeadActor);
+
+private:
+
+	FTimerHandle RestartTimerHandle;
 
 public:
 
