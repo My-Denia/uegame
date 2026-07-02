@@ -97,8 +97,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Melee Attack", meta = (ClampMin = 0, ClampMax = 5, Units = "s"))
 	float AttackInputCacheTimeTolerance = 1.0f;
 
-	/** Time at which an attack button was last pressed */
-	float CachedAttackInputTime = 0.0f;
+	/** Time at which an attack button was last pressed. Starts stale (large negative):
+	 *  with 0.0 a first attack within AttackInputCacheTimeTolerance of level start would
+	 *  treat the non-existent cached press as fresh and chain without a second input. */
+	float CachedAttackInputTime = -1000.0f;
 
 	/** If true, the character is currently playing an attack animation */
 	bool bIsAttacking = false;
