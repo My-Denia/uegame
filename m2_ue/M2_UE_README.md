@@ -11,7 +11,7 @@ Spawner 已从本目录的脚手架**落地**到 UE 模块源码里;本目录现
 |---|---|---|
 | 引擎无关核心(生成/校验) | `../dungeon.hpp` | ✅ g++ 实证(>120k 次 generate+validate,0 失败) |
 | 引擎无关适配(坐标映射/世界连通/确定性哈希) | `../m2_adapter.hpp` + `../m2_adapter_test.cpp` | ✅ g++ 实证(5000/5000 世界连通与网格一致;哈希稳定) |
-| UE 胶水(ISM/碰撞/运行时导航/玩家落点) | `../uegame/Source/uegame/DungeonSpawner.h` `.cpp` | ⚠️ 已落地,**未编译**(等 milestone A 的 UBT 构建) |
+| UE 胶水(ISM/碰撞/运行时导航/玩家落点) | `../uegame/Source/uegame/DungeonSpawner.h` `.cpp` | ✅ milestone A 已过:UBT/MSVC 14.44 编译 `Result: Succeeded`,零警告(unity 聚合含 DungeonSpawner.cpp) |
 | 模块接线 | `../uegame/Source/uegame/uegame.Build.cs` | ✅ `NavigationSystem` 依赖 + 仓库根 include 路径 |
 | 运行时导航配置 | `../uegame/Config/DefaultEngine.ini` | ✅ `[/Script/NavigationSystem.RecastNavMesh] RuntimeGeneration=Dynamic` |
 
@@ -27,7 +27,7 @@ Spawner 已从本目录的脚手架**落地**到 UE 模块源码里;本目录现
 
 ## 剩余里程碑
 
-- **A 编译**(验收 #1):`"<UE>\Engine\Build\BatchFiles\Build.bat" uegameEditor Win64 Development -Project="C:\Files\uegame\uegame\uegame.uproject" -WaitMutex`,要求贴出命令与 `Build succeeded`(MSVC,非 g++)。
+- ✅ **A 编译**(验收 #1,2026-07-02 已过):`"C:\Program Files (x86)\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" uegameEditor Win64 Development -Project="C:\Files\uegame\uegame\uegame.uproject" -WaitMutex` → `Result: Succeeded`,MSVC 14.44.35228 + Win SDK 10.0.26100,`[1/4] Compile Module.uegame.cpp`(unity 聚合含 `DungeonSpawner.cpp`)零警告零错误。注意 Live Coding 活跃时 UBT 会拒绝构建——先关编辑器。
 - **B PIE 取证**(验收 #2/#3/#4):编辑器把 `ADungeonSpawner` 拖进关卡设 `Seed` → PIE。
   - 保真:`LogTemp` 里 `[Dungeon] seed=.. rooms=.. spawned N instances (walkable == plan-passable) .. fully-connected=YES planHash=0x..` + 关卡截图。
   - 可走:角色从起点房走到远房,沿途截图;撞墙不穿模、地面有 navmesh(`P` 键可视化)。
