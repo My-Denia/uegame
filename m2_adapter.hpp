@@ -207,6 +207,40 @@ inline std::vector<EnemyPlacement> buildEnemyPlan(const dungeon::Layout& L,
     return plan;
 }
 
+// ---------------------------------------------------------------------------
+// M4: 整局确定性 —— 楼层种子派生与下一局种子链 (引擎无关)
+// ---------------------------------------------------------------------------
+
+// splitmix64 整数混淆 (公开常数)。与 mt19937_64 解耦: 派生只做整数混合, 不消耗任何 RNG 流。
+inline std::uint64_t mix64(std::uint64_t x) {
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+// 楼层 N 的布局种子 = mix(runSeed ^ mix(N))。同 runSeed -> 整局楼层序列逐位相同;
+// 楼层 1 的种子也经过混淆 (刻意 != runSeed, 避免"第一层退化为单层模式"的特例)。
+inline std::uint64_t deriveFloorSeed(std::uint64_t runSeed, int floorIndex) {
+    return mix64(runSeed ^ mix64(static_cast<std::uint64_t>(floorIndex)));
+}
+
+// 胜/负后重开新局: 下一局种子从上一局确定性链出 (无时钟/未播种 RNG, 契约 F)。
+inline std::uint64_t nextRunSeed(std::uint64_t runSeed) {
+    return mix64(runSeed ^ 0xD1B54A32D192ED03ULL);
+}
+
+// 楼层 N 的有效缩放 (线性, 因子全部来自 DataTable, 代码零常数):
+//   multiplier(N) = 1 + (N-1) * perFloorScaling
+// 敌人数取 llround (整数), HP 保持浮点。楼层 1 恒为基础值。
+inline double floorMultiplier(int floorIndex, double perFloorScaling) {
+    return 1.0 + (static_cast<double>(floorIndex) - 1.0) * perFloorScaling;
+}
+inline int scaledEnemiesPerRoom(int base, int floorIndex, double perFloorScaling) {
+    const double v = static_cast<double>(base) * floorMultiplier(floorIndex, perFloorScaling);
+    return static_cast<int>(v + 0.5);   // llround 语义, 避免 <cmath> 依赖
+}
+
 // 敌人布点哈希：只混入 tile 无关字段 (roomIndex, gx, gy)，因此 g++ (任意 tileSize)
 // 与 UE (tileSize=200) 对同一种子打出同一个值；世界坐标由这些字段确定性派生。
 inline std::uint64_t enemyPlanHash(const std::vector<EnemyPlacement>& plan) {
