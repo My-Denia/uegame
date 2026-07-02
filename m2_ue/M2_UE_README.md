@@ -2,7 +2,26 @@
 
 把 M1 的抽象 `Layout` 渲染成可行走的 UE5 第三人称关卡。
 
-## 状态:代码已落地进 UE 工程,待 UE 工具链编译验证
+## ✅ M2 完成:四条验收全部取证(2026-07-02)
+
+经 MCP(项目工具集 `uegameEditor.UegameMcpToolset`)驱动 PIE 实测,日志与截图见下:
+
+1. **构建**:`Build.bat uegameEditor Win64 Development` → `Result: Succeeded`,MSVC 14.44,零警告(多次构建,含新增编辑器模块 13 动作全绿)。
+2. **保真**:`[Dungeon] seed=7 rooms=8 connections=9 | spawned 2560 instances (441 walkable == 441 plan-passable) | world reach 441/441 cells, 8/8 rooms | fully-connected=YES` —— 实 spawn 实例数与抽象 Layout 逐项相等;截图 `evidence/`。
+3. **可走**:`NAVPATH valid=YES partial=NO points=11 length=14976` + 角色实走 `ARRIVED at farthest room: dist2D=39 elapsed=30.7s`(tileSize=200;沿走廊绕行 14976 vs 直线 9485,碰撞约束下的路径跟随);截图 `evidence/m2_walk_corridor_seed7.png`、`evidence/m2_arrived_far_room_seed7.png`。
+4. **确定性**:seed 7 @tileSize=100 的 `planHash=0xa7cdf0446a8c246e` 在**四次独立 PIE 会话**一致,且与 g++ standalone 值逐位相同(跨编译器实证);@tileSize=200 的 `0x5e03831865ce5cb2` 在两轮独立 PIE 一致。
+
+### 运行时导航的三个实测结论(排障记录,含两次 Live Coding 热修)
+
+1. 运行时 spawn 的 `NavMeshBoundsVolume` 没有 brush 几何 → bounds 为空且**在 SpawnActor 内部就以空 bounds 注册**。修法(已在代码里):`SpawnActorDeferred` + 在 `FinishSpawning` 前挂好地图尺寸的 `UBoxComponent`(nav 系统读 `GetComponentsBoundingBox(true)`,NavigationSystem.cpp:4145)。
+2. 地牢几何注册早于 nav 体积 → 界外 dirty area 被丢弃。修法(已在代码里):体积注册后 `AddDirtyArea(全图, ENavigationDirtyFlag::All)` 强制重铺。
+3. **tileSize=100 的 1 格走廊会被 navmesh 剔除**:`AgentRadius=35` 两侧侵蚀后仅剩 ~30cm,Recast 丢弃 → 每房成孤岛(路径 partial)。**建议 tileSize ≥ 200**(`Dungeon.Spawn <seed> 200` 或在 spawner 上设 `TileSize=200`)。玩家物理碰撞在 100 下其实能过(胶囊 68cm<100cm),被卡的只是 navmesh;后续里程碑若定 100 需调 agent radius 或加宽走廊。
+
+### 复现命令(编辑器开着、MCP server 监听 8000 时)
+
+MCP `call_tool`:`StartPIE` → `ExecConsoleCommand "Dungeon.Spawn 7 200"` → `ExecConsoleCommand "Dungeon.WalkFar"` → 日志看 `NAVPATH`/`ARRIVED` → `ExecConsoleCommand "HighResShot 1600x900"` → `StopPIE`。
+
+## 状态:代码已落地进 UE 工程(以下为落地期记录)
 
 Spawner 已从本目录的脚手架**落地**到 UE 模块源码里;本目录现在只保留这份文档
 (旧的 `DungeonSpawner.h/.cpp` 脚手架已删除,历史见 git)。

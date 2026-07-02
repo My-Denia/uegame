@@ -55,8 +55,19 @@ void DungeonSpawnCmd(const TArray<FString>& Args, UWorld* World)
 		return;
 	}
 	Spawner->Seed = Seed;
+	// Optional tile size (cm). 1-cell corridors at 100cm erode to ~30cm under the default
+	// nav agent radius (35) and get culled from the navmesh; 200cm keeps them navigable.
+	if (Args.Num() > 1)
+	{
+		const float TS = FCString::Atof(*Args[1]);
+		if (TS >= 10.0f)
+		{
+			Spawner->TileSize = TS;
+		}
+	}
 	Spawner->FinishSpawning(Xf);
-	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] spawned ADungeonSpawner seed=%d in world=%s"), Seed, *World->GetName());
+	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] spawned ADungeonSpawner seed=%d tileSize=%.0f in world=%s"),
+		Seed, Spawner->TileSize, *World->GetName());
 }
 
 void DungeonWalkFarCmd(const TArray<FString>& Args, UWorld* World)

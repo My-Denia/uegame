@@ -7,6 +7,8 @@
 
 #include "DungeonSpawner.h"
 
+#include "AI/Navigation/NavigationDirtyArea.h"
+#include "Components/BoxComponent.h"
 #include "Components/BrushComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -189,10 +191,16 @@ void ADungeonSpawner::SpawnNavBounds()
 	const float MapH = Cfg.height * TileSize;
 	const FVector Center(MapW * 0.5f, MapH * 0.5f, WallHeight * 0.5f);
 
-	FActorSpawnParameters Params;
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	ANavMeshBoundsVolume* Vol = World->SpawnActor<ANavMeshBoundsVolume>(
-		ANavMeshBoundsVolume::StaticClass(), FTransform(Center), Params);
+	// Advisory #3, resolved. A runtime-spawned brush volume has no brush geometry, so its
+	// bounds are empty. Worse, the nav system registers the volume during spawn
+	// (PostRegisterAllComponents -> OnNavigationBoundsAdded) - attaching geometry AFTER
+	// SpawnActor registers EMPTY bounds ("1 empty bounds" in LogNavigationDirtyArea) and
+	// the navmesh never builds. Fix: deferred spawn, attach a map-sized UBoxComponent
+	// (the nav system reads GetComponentsBoundingBox(true), NavigationSystem.cpp:4145)
+	// BEFORE FinishSpawning, so registration sees the real bounds in one step.
+	ANavMeshBoundsVolume* Vol = World->SpawnActorDeferred<ANavMeshBoundsVolume>(
+		ANavMeshBoundsVolume::StaticClass(), FTransform(Center), nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	if (!Vol)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -204,15 +212,29 @@ void ADungeonSpawner::SpawnNavBounds()
 	{
 		VolRoot->SetMobility(EComponentMobility::Movable);
 	}
-
-	// Advisory #3 caveat: a runtime-spawned brush volume has no brush geometry, so scaling
-	// may still yield empty bounds. We log the measured bounds so the PIE evidence shows
-	// unambiguously whether this runtime volume worked or the hand-placed fallback is needed.
-	Vol->SetActorScale3D(FVector(MapW / 200.0f, MapH / 200.0f, FMath::Max(1.0f, WallHeight / 100.0f)));
+	UBoxComponent* BoundsBox = NewObject<UBoxComponent>(Vol, TEXT("DungeonNavBoundsBox"));
+	BoundsBox->SetupAttachment(Vol->GetRootComponent());
+	BoundsBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	BoundsBox->SetBoxExtent(FVector(MapW * 0.5f, MapH * 0.5f, FMath::Max(WallHeight, 200.0f)));
+	Vol->AddInstanceComponent(BoundsBox);
+	Vol->FinishSpawning(FTransform(Center));
+	if (!BoundsBox->IsRegistered())
+	{
+		BoundsBox->RegisterComponent();
+	}
 
 	if (UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
 	{
-		Nav->OnNavigationBoundsUpdated(Vol);
+		Nav->OnNavigationBoundsUpdated(Vol);   // refresh with the final bounds
+
+		// The dungeon ISM geometry registered BEFORE this volume existed, so its dirty
+		// areas were dropped as out-of-bounds (LogNavigationDirtyArea "Skipped ... empty
+		// bounds"). Re-dirty the whole map explicitly so the generator rebuilds every
+		// tile now that the bounds are in place.
+		const FBox MapBox(
+			FVector(-100.0f, -100.0f, -200.0f),
+			FVector(MapW + 100.0f, MapH + 100.0f, WallHeight * 2.0f));
+		Nav->AddDirtyArea(MapBox, ENavigationDirtyFlag::All, TEXT("DungeonSpawner full rebuild"));
 	}
 
 	const FBox VolBounds = Vol->GetComponentsBoundingBox(true);
