@@ -113,17 +113,26 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "floors") {
-        std::uint64_t runSeed = (argc > 2 && argv[2][0] != '-') ? std::strtoull(argv[2], nullptr, 10) : 7;
-        int n = (argc > 3 && argv[3][0] != '-') ? std::atoi(argv[3]) : 3;
+        std::uint64_t runSeed = 7;
+        int n = 3;
         // 基准值:默认常量必须等于提交时的 CSV;--csv <path> 则直接读数据表 Default 行,
         // 这样改表后预注册参考值随表移动,不会悄悄基于旧配置 (布点数量变 -> 哈希变)。
         int basePerRoom = 2;                // == CSV EnemiesPerRoom
         double baseHP = 30.0;               // == CSV EnemyMaxHP
         double scaling = 1.0;               // == CSV PerFloorScaling
         std::string cfgSrc = "built-in-defaults";
-        for (int a = 2; a < argc - 1; ++a) {
-            if (std::string(argv[a]) != "--csv") continue;
-            const char* path = argv[a + 1];
+        // 单趟解析:--csv 消费它的取值,剩余按序算位置参数 (runSeed, n)。这样
+        // `floors --csv <path>` 不会把路径误当楼层数吞掉 (atoi=0 -> 静默零输出)。
+        int positional = 0;
+        for (int a = 2; a < argc; ++a) {
+            if (std::string(argv[a]) != "--csv") {
+                if (positional == 0) runSeed = std::strtoull(argv[a], nullptr, 10);
+                else if (positional == 1) n = std::atoi(argv[a]);
+                ++positional;
+                continue;
+            }
+            if (a + 1 >= argc) { std::cerr << "--csv needs a path\n"; return 2; }
+            const char* path = argv[++a];
             std::ifstream in(path);
             if (!in) { std::cerr << "cannot open CSV: " << path << "\n"; return 2; }
             std::string header, row, line;
@@ -156,6 +165,7 @@ int main(int argc, char** argv) {
             scaling = std::atof(vs[cScal].c_str());
             cfgSrc = std::string("csv(") + path + ")";
         }
+        if (n <= 0) { std::cerr << "floor count must be >= 1 (got " << n << ")\n"; return 2; }
         m2::WorldConfig w200; w200.tileSize = 200;   // UE 默认, 预注册值必须按此计算
         std::cout << "runSeed=" << runSeed << " floors=" << n
                   << " basePerRoom=" << basePerRoom << " baseHP=" << baseHP
