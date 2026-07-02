@@ -18,7 +18,8 @@ public class uegame : ModuleRules
 			"StateTreeModule",
 			"GameplayStateTreeModule",
 			"UMG",
-			"Slate"
+			"Slate",
+			"NavigationSystem"   // DungeonSpawner: UNavigationSystemV1 / runtime navmesh
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
