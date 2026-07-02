@@ -346,6 +346,30 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonFaceNearestCmd(
 	TEXT("Rotate the player pawn to face the nearest enemy (forensic aid for the melee sweep)"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFaceNearestCmd));
 
+// --- M4 forensic verbs ---
+
+void DungeonRegenCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || !World->IsGameWorld() || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage (game worlds only): Dungeon.Regen <uint64 seed>"));
+		return;
+	}
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	if (!Spawner)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] no DungeonSpawner; run Dungeon.Spawn first"));
+		return;
+	}
+	const uint64 NewSeed = FCString::Strtoui64(*Args[0], nullptr, 10);
+	Spawner->RegenerateFloor(NewSeed);
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRegenCmd(
+	TEXT("Dungeon.Regen"),
+	TEXT("In-place regenerate the dungeon from a 64-bit seed (M4 transition spike): Dungeon.Regen <seed>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRegenCmd));
+
 #endif // !UE_BUILD_SHIPPING
 
 } // namespace

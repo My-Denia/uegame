@@ -60,6 +60,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Dungeon")
 	void Build();
 
+	// --- M4 floor transition (mechanism (a): in-place regeneration) ---
+
+	/** Full 64-bit seed actually used by generate(). Floor seeds derived from
+	 *  (runSeed, floorIndex) exceed int32; the editor-facing int32 Seed remains for
+	 *  hand-testing and is used only when no 64-bit seed has been set. */
+	uint64 GetEffectiveSeed64() const { return bHasSeed64 ? Seed64 : static_cast<uint64>(Seed); }
+	void SetSeed64(uint64 InSeed) { Seed64 = InSeed; bHasSeed64 = true; }
+
+	/** In-place floor transition: despawn all enemies, rebuild geometry from NewSeed,
+	 *  re-dirty the navmesh over the whole map, respawn enemies (scaled), teleport the
+	 *  player to the new start room. World and nav system stay alive (no OpenLevel -
+	 *  that path loses the RecastNavMesh, M3 finding). */
+	void RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride = -1,
+	                     float InEnemyHPOverride = -1.0f);
+
 	/** Absolute world position of the start room center (valid after Build). */
 	FVector GetStartWorldLocation() const { return StartWorld; }
 
@@ -89,7 +104,16 @@ public:
 
 private:
 	void SpawnNavBounds();
-	void SpawnEnemies();
+	/** Spawn the deterministic enemy plan. Overrides (<0 = use DataTable base values)
+	 *  let RegenerateFloor apply the M4 per-floor scaling. */
+	void SpawnEnemies(int32 InEnemiesPerRoomOverride = -1, float InEnemyHPOverride = -1.0f);
+	/** Mark the whole map dirty so the dynamic navmesh rebuilds (M2 pattern, factored
+	 *  out so floor transitions can reuse it). */
+	void RefreshNavigation();
+
+	/** M4: 64-bit runtime seed (floor seeds exceed int32). */
+	uint64 Seed64 = 0;
+	bool bHasSeed64 = false;
 
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<USceneComponent> Root;
