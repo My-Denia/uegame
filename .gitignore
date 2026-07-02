@@ -12,3 +12,5 @@ cmake-build*/
 *.obj
 *.exe
 *.out
+# Harness artifacts (agent-created, not project source)
+/goal-runs/

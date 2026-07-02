@@ -26,7 +26,7 @@ public:
 		}
 		else
 		{
-			PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda([]()
+			PostEngineInitHandle = FCoreDelegates::GetOnPostEngineInit().AddLambda([]()
 			{
 				UToolsetRegistry::RegisterToolsetClass(UUegameMcpToolset::StaticClass());
 			});
@@ -37,7 +37,7 @@ public:
 	{
 		if (PostEngineInitHandle.IsValid())
 		{
-			FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+			FCoreDelegates::GetOnPostEngineInit().Remove(PostEngineInitHandle);
 		}
 		if (UObjectInitialized())
 		{

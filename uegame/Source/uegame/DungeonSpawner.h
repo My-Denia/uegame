@@ -29,9 +29,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
 	int32 Seed = 7;
 
-	/** World size of one grid cell in cm (tile size == grid step). */
+	/** World size of one grid cell in cm (tile size == grid step). Default 200: at 100 the
+	 *  1-cell corridors erode below the nav AgentRadius(35) and get culled from the navmesh
+	 *  (M2 finding) - the constraint is absorbed here in the adapter layer, M1 untouched. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon", meta=(ClampMin="10.0"))
-	float TileSize = 100.0f;
+	float TileSize = 200.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon", meta=(ClampMin="10.0"))
 	float WallHeight = 200.0f;
