@@ -1,6 +1,10 @@
 # Build artifacts
 /dungeon
 /dungeon.exe
+/m2test
+/m2test.exe
+/m1_verify
+/m1_verify.exe
 dungeon_audit
 build/
 cmake-build*/
@@ -8,3 +12,5 @@ cmake-build*/
 *.obj
 *.exe
 *.out
+# Harness artifacts (agent-created, not project source)
+/goal-runs/
