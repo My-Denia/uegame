@@ -140,4 +140,56 @@ inline std::uint64_t spawnPlanHash(const dungeon::Layout& L, const WorldConfig& 
     return h;
 }
 
+// ---------------------------------------------------------------------------
+// M3: 确定性敌人布点 (引擎无关)
+// ---------------------------------------------------------------------------
+
+struct EnemyPlacement {
+    int roomIndex = 0;
+    int gx = 0, gy = 0;        // 房间矩形内部的格子
+    long long wx = 0, wy = 0;  // 该格子的世界中心 (由 gx/gy 派生, 不参与哈希)
+};
+
+// 敌人布点：与地牢同源的种子子流 (config.seed ^ 黄金比例常数)，
+// 与 generate() 内部的抽取序列解耦。同 (layout, enemiesPerRoom, excludeRoom)
+// -> 布点逐字节相同。无时间/全局/未播种 RNG。
+inline std::vector<EnemyPlacement> buildEnemyPlan(const dungeon::Layout& L,
+                                                  const WorldConfig& wc,
+                                                  int enemiesPerRoom,
+                                                  int excludeRoomIndex) {
+    std::vector<EnemyPlacement> plan;
+    if (enemiesPerRoom <= 0) return plan;
+    std::mt19937_64 rng(L.config.seed ^ 0x9E3779B97F4A7C15ULL);
+    const long long ts = wc.tileSize;
+    for (int r = 0; r < static_cast<int>(L.rooms.size()); ++r) {
+        if (r == excludeRoomIndex) continue;
+        const dungeon::Room& rm = L.rooms[r];
+        for (int k = 0; k < enemiesPerRoom; ++k) {
+            const int gx = rm.x + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.w));
+            const int gy = rm.y + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.h));
+            EnemyPlacement p;
+            p.roomIndex = r;
+            p.gx = gx;
+            p.gy = gy;
+            p.wx = wc.originX + static_cast<long long>(gx) * ts + ts / 2;
+            p.wy = wc.originY + static_cast<long long>(gy) * ts + ts / 2;
+            plan.push_back(p);
+        }
+    }
+    return plan;
+}
+
+// 敌人布点哈希：只混入 tile 无关字段 (roomIndex, gx, gy)，因此 g++ (任意 tileSize)
+// 与 UE (tileSize=200) 对同一种子打出同一个值；世界坐标由这些字段确定性派生。
+inline std::uint64_t enemyPlanHash(const std::vector<EnemyPlacement>& plan) {
+    std::uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+    for (const EnemyPlacement& p : plan) {
+        mix(static_cast<std::uint32_t>(p.roomIndex));
+        mix(static_cast<std::uint32_t>(p.gx));
+        mix(static_cast<std::uint32_t>(p.gy));
+    }
+    return h;
+}
+
 } // namespace m2
