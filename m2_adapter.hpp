@@ -166,15 +166,20 @@ inline std::vector<EnemyPlacement> buildEnemyPlan(const dungeon::Layout& L,
         const dungeon::Room& rm = L.rooms[r];
         std::set<std::pair<int, int>> usedCells;   // 每房无放回抽样 (同格双敌会被引擎
                                                    // 碰撞调整挪走, 破坏确定性布点契约)
-        for (int k = 0; k < enemiesPerRoom; ++k) {
+        // 布点数以房间唯一格数封顶: 配置超出时截断而不是退化为重复格。
+        const int maxUnique = rm.w * rm.h;
+        const int countForRoom = std::min(enemiesPerRoom, maxUnique);
+        for (int k = 0; k < countForRoom; ++k) {
             int gx = 0, gy = 0;
-            // 命中已占格则重抽 (重抽同样消耗 rng, 保持确定性); 上限兜底: 当
-            // enemiesPerRoom 接近房间格数时允许重复而不是死循环。
-            for (int attempt = 0; attempt < 64; ++attempt) {
+            bool unique = false;
+            // 命中已占格则重抽 (重抽同样消耗 rng, 保持确定性)。重抽预算耗尽仍未
+            // 找到空格时跳过该布点 (宁缺毋重复), 保证计划内永无重复格。
+            for (int attempt = 0; attempt < 64 && !unique; ++attempt) {
                 gx = rm.x + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.w));
                 gy = rm.y + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.h));
-                if (usedCells.insert({ gx, gy }).second) break;
+                unique = usedCells.insert({ gx, gy }).second;
             }
+            if (!unique) continue;
             EnemyPlacement p;
             p.roomIndex = r;
             p.gx = gx;
