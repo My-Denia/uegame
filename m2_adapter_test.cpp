@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
 
     if (mode == "enemyDeterminism") {
         long n = (argc > 2) ? std::strtol(argv[2], nullptr, 10) : 500;
-        long identical = 0, inRoom = 0, excluded = 0;
+        long identical = 0, inRoom = 0, excluded = 0, noDup = 0;
         for (long i = 0; i < n; ++i) {
             Config c; c.seed = static_cast<std::uint64_t>(1 + i);
             Layout L = generate(c);
@@ -76,20 +76,24 @@ int main(int argc, char** argv) {
                        p1[k].wx == p2[k].wx && p1[k].wy == p2[k].wy;
             }
             if (same) ++identical;
-            bool okRoom = true, okExcl = true;
+            bool okRoom = true, okExcl = true, okDup = true;
+            std::set<std::tuple<int, int, int>> cellSet;   // (room, gx, gy)
             for (const m2::EnemyPlacement& p : p1) {
                 const Room& rm = L.rooms[static_cast<std::size_t>(p.roomIndex)];
                 if (p.gx < rm.x || p.gx >= rm.x + rm.w ||
                     p.gy < rm.y || p.gy >= rm.y + rm.h) okRoom = false;
                 if (p.roomIndex == L.startRoom) okExcl = false;
+                if (!cellSet.insert({ p.roomIndex, p.gx, p.gy }).second) okDup = false;
             }
             if (okRoom) ++inRoom;
             if (okExcl) ++excluded;
+            if (okDup) ++noDup;
         }
         std::cout << "identical plans (2x gen) : " << identical << "/" << n << "\n";
         std::cout << "all placements in-room   : " << inRoom << "/" << n << "\n";
         std::cout << "start room excluded      : " << excluded << "/" << n << "\n";
-        return (identical == n && inRoom == n && excluded == n) ? 0 : 1;
+        std::cout << "no duplicate cells       : " << noDup << "/" << n << "\n";
+        return (identical == n && inRoom == n && excluded == n && noDup == n) ? 0 : 1;
     }
 
     if (mode == "determinism") {

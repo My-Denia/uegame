@@ -68,6 +68,14 @@ void ACombatPlayerController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
 
+	// capture the level-start transform so dying before any checkpoint respawns the
+	// player at the original spawn point instead of the identity transform (origin)
+	if (!bHasRespawnTransform)
+	{
+		RespawnTransform = InPawn->GetActorTransform();
+		bHasRespawnTransform = true;
+	}
+
 	// subscribe to the pawn's OnDestroyed delegate
 	InPawn->OnDestroyed.AddDynamic(this, &ACombatPlayerController::OnPawnDestroyed);
 }
@@ -76,6 +84,7 @@ void ACombatPlayerController::SetRespawnTransform(const FTransform& NewRespawn)
 {
 	// save the new respawn transform
 	RespawnTransform = NewRespawn;
+	bHasRespawnTransform = true;
 }
 
 void ACombatPlayerController::OnPawnDestroyed(AActor* DestroyedActor)

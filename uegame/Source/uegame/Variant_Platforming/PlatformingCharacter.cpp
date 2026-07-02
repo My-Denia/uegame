@@ -251,7 +251,10 @@ void APlatformingCharacter::DoDash()
 	// enable the jump trails
 	SetJumpTrailState(true);
 
-	// play the dash montage
+	// play the dash montage; if it cannot start (unset montage, no anim instance, or
+	// Montage_Play failing) no end delegate will ever fire, so roll the dash state back
+	// immediately instead of leaving the character floating with dash locked out
+	bool bMontageStarted = false;
 	if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
 	{
 		const float MontageLength = AnimInstance->Montage_Play(DashMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, true);
@@ -260,7 +263,12 @@ void APlatformingCharacter::DoDash()
 		if (MontageLength > 0.0f)
 		{
 			AnimInstance->Montage_SetEndDelegate(OnDashMontageEnded, DashMontage);
+			bMontageStarted = true;
 		}
+	}
+	if (!bMontageStarted)
+	{
+		EndDash();
 	}
 }
 

@@ -250,6 +250,10 @@ void ACombatCharacter::AttackMontageEnded(UAnimMontage* Montage, bool bInterrupt
 	// check if we have a non-stale cached input
 	if (GetWorld()->GetTimeSeconds() - CachedAttackInputTime <= AttackInputCacheTimeTolerance)
 	{
+		// consume the cached input (back to the stale sentinel) so a short or interrupted
+		// follow-up montage cannot reuse the same press to chain yet another attack
+		CachedAttackInputTime = -1000.0f;
+
 		// are we holding the charged attack button?
 		if (bIsChargingAttack)
 		{
@@ -318,7 +322,8 @@ void ACombatCharacter::CheckCombo()
 		if (GetWorld()->GetTimeSeconds() - CachedAttackInputTime <= ComboInputCacheTimeTolerance)
 		{
 			// consume the attack input so we don't accidentally trigger it twice
-			CachedAttackInputTime = 0.0f;
+			// (stale sentinel: 0.0 would still look fresh during the first second of play)
+			CachedAttackInputTime = -1000.0f;
 
 			// increase the combo counter
 			++ComboCount;

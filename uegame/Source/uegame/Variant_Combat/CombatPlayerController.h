@@ -48,6 +48,10 @@ protected:
 	/** Transform to respawn the character at. Can be set to create checkpoints */
 	FTransform RespawnTransform;
 
+	/** True once RespawnTransform holds a real location (level-start capture or checkpoint);
+	 *  guards against respawning at the identity transform (world origin) */
+	bool bHasRespawnTransform = false;
+
 protected:
 
 	/** Gameplay initialization */

@@ -51,8 +51,8 @@ void ACombatEnemySpawner::EndPlay(EEndPlayReason::Type EndPlayReason)
 
 void ACombatEnemySpawner::SpawnEnemy()
 {
-	// ensure the enemy class is valid
-	if (IsValid(EnemyClass))
+	// ensure we still have enemies to spawn (SpawnCount may legitimately be 0) and the class is valid
+	if (SpawnCount > 0 && IsValid(EnemyClass))
 	{
 		// spawn the enemy at the reference capsule's transform
 		FActorSpawnParameters SpawnParams;

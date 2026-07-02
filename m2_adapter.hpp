@@ -164,9 +164,17 @@ inline std::vector<EnemyPlacement> buildEnemyPlan(const dungeon::Layout& L,
     for (int r = 0; r < static_cast<int>(L.rooms.size()); ++r) {
         if (r == excludeRoomIndex) continue;
         const dungeon::Room& rm = L.rooms[r];
+        std::set<std::pair<int, int>> usedCells;   // 每房无放回抽样 (同格双敌会被引擎
+                                                   // 碰撞调整挪走, 破坏确定性布点契约)
         for (int k = 0; k < enemiesPerRoom; ++k) {
-            const int gx = rm.x + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.w));
-            const int gy = rm.y + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.h));
+            int gx = 0, gy = 0;
+            // 命中已占格则重抽 (重抽同样消耗 rng, 保持确定性); 上限兜底: 当
+            // enemiesPerRoom 接近房间格数时允许重复而不是死循环。
+            for (int attempt = 0; attempt < 64; ++attempt) {
+                gx = rm.x + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.w));
+                gy = rm.y + static_cast<int>(rng() % static_cast<std::uint64_t>(rm.h));
+                if (usedCells.insert({ gx, gy }).second) break;
+            }
             EnemyPlacement p;
             p.roomIndex = r;
             p.gx = gx;
