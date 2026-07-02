@@ -14,6 +14,7 @@
 #include "FloorManager.generated.h"
 
 class ADungeonSpawner;
+struct FActorsInitializedParams;
 
 UCLASS()
 class UEGAME_API UUegameFloorManager : public UGameInstanceSubsystem
@@ -21,6 +22,9 @@ class UEGAME_API UUegameFloorManager : public UGameInstanceSubsystem
 	GENERATED_BODY()
 
 public:
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
+
 	static UUegameFloorManager* Get(UWorld* World);
 
 	bool IsRunActive() const { return bRunActive; }
@@ -37,15 +41,25 @@ public:
 	void NotifyRunFailed();
 
 private:
+	/** Transitions are deferred to next tick (the trigger may sit on the call stack of an
+	 *  actor the transition destroys). The pending kind is re-read at fire time: a death
+	 *  arriving inside the window upgrades a queued Descend to Fail - the run must never
+	 *  continue onto the next floor with a dead pawn. The reverse never happens. */
+	enum class EPendingTransition : uint8 { None, Descend, Fail };
+
 	void StartFloor(int32 NewFloorIndex);
 	void RestartRun(const TCHAR* Reason);
+	void ExecutePendingTransition();
+	/** Shipping-safe bootstrap for maps without a pre-placed spawner (console verbs are
+	 *  compiled out of Shipping, so gameplay code must be able to enter the loop alone). */
+	void OnWorldActorsInitialized(const FActorsInitializedParams& Params);
 	ADungeonSpawner* FindSpawner() const;
 	void HealPlayerFull() const;
+
+	FDelegateHandle ActorsInitializedHandle;
 
 	uint64 RunSeed = 0;
 	int32 FloorIndex = 0;
 	bool bRunActive = false;
-	/** Re-entrancy guard: transitions are deferred to next tick (the trigger may sit on
-	 *  the call stack of an actor the transition destroys). */
-	bool bTransitionPending = false;
+	EPendingTransition PendingTransition = EPendingTransition::None;
 };

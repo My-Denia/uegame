@@ -442,6 +442,30 @@ void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
 	}
 }
 
+void DungeonDescendThenDieCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	// Deterministic probe for the pending-descend death window. The window is exactly one
+	// tick and the MCP bridge pumps one command per tick, so the race is not reachable from
+	// two console calls - both actions must run inside a single handler. Expected result:
+	// [FloorCompleted] -> [RunFailed] (death overrides pending descend) -> restart at floor 1,
+	// and never a floor advance with a dead pawn.
+	if (!World)
+	{
+		return;
+	}
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!FM || !HP)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] DescendThenDie needs an active run and a player"));
+		return;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[DescendThenDie] same-tick descend + lethal SetHP (window probe)"));
+	FM->RequestDescend(/*bForce=*/true);
+	HP->SetHP(0.0f);
+}
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonStartRunCmd(
 	TEXT("Dungeon.StartRun"),
 	TEXT("Begin an M4 run at floor 1: Dungeon.StartRun <uint64 runSeed>"),
@@ -461,6 +485,11 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonSetHPCmd(
 	TEXT("Dungeon.SetHP"),
 	TEXT("Test-only cheat: set the player's HP (0 triggers the death path)"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonSetHPCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonDescendThenDieCmd(
+	TEXT("Dungeon.DescendThenDie"),
+	TEXT("Forensic: force-descend and kill the player in the SAME tick (pending-window probe)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonDescendThenDieCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

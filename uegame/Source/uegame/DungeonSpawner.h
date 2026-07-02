@@ -53,6 +53,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
 	bool bSpawnEnemies = true;
 
+	/** M4: one tick after BeginPlay, start a run (floor 1) seeded from this spawner if none
+	 *  is active yet. This is the gameplay path into the floor loop - the Dungeon.StartRun
+	 *  console verb is compiled out of Shipping builds, so it cannot be the only caller.
+	 *  The FloorManager's own helper spawner has this disabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dungeon")
+	bool bAutoStartRun = true;
+
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 

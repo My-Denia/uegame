@@ -16,6 +16,50 @@
 // Engine-agnostic seed pipeline (repo root include path; .cpp-only include).
 #include "m2_adapter.hpp"
 
+namespace
+{
+	// Run seed for maps with no pre-placed spawner: the cross-compiler pinned forensic
+	// seed, so a fresh install's first run IS the pre-registered reference run. Restarts
+	// chain away from it deterministically via m2::nextRunSeed.
+	constexpr uint64 kDefaultRunSeed = 7;
+}
+
+void UUegameFloorManager::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+	ActorsInitializedHandle = FWorldDelegates::OnWorldInitializedActors.AddUObject(
+		this, &UUegameFloorManager::OnWorldActorsInitialized);
+}
+
+void UUegameFloorManager::Deinitialize()
+{
+	FWorldDelegates::OnWorldInitializedActors.Remove(ActorsInitializedHandle);
+	Super::Deinitialize();
+}
+
+void UUegameFloorManager::OnWorldActorsInitialized(const FActorsInitializedParams& Params)
+{
+	UWorld* World = Params.World;
+	if (!World || !World->IsGameWorld() || World->GetGameInstance() != GetGameInstance())
+	{
+		return;
+	}
+	// One tick later the player pawn exists. A level-placed spawner takes precedence:
+	// this side yields whenever FindSpawner() sees one (that spawner's own bAutoStartRun
+	// decides), and both sides re-check bRunActive, so double-starts are impossible.
+	World->GetTimerManager().SetTimerForNextTick(
+		FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (!bRunActive && !FindSpawner())
+			{
+				UE_LOG(LogTemp, Display,
+					TEXT("[Dungeon] AutoStartRun: runSeed=%llu (default; no spawner in level)"),
+					static_cast<unsigned long long>(kDefaultRunSeed));
+				StartRun(kDefaultRunSeed);
+			}
+		}));
+}
+
 UUegameFloorManager* UUegameFloorManager::Get(UWorld* World)
 {
 	if (!World || !World->GetGameInstance())
@@ -75,6 +119,7 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 		}
 		Deferred->bSpawnEnemies = false;
 		Deferred->bTeleportPlayerToStart = false;
+		Deferred->bAutoStartRun = false;   // this spawner IS manager-driven; never self-start
 		Deferred->FinishSpawning(FTransform(FVector::ZeroVector));
 		Deferred->bSpawnEnemies = true;
 		Deferred->bTeleportPlayerToStart = true;
@@ -83,6 +128,7 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 
 	RunSeed = InRunSeed;
 	bRunActive = true;
+	PendingTransition = EPendingTransition::None;   // a manual (re)start cancels queued intent
 	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d"),
 		static_cast<unsigned long long>(RunSeed), FUegameCombatConfig::Get().MaxFloors);
 	StartFloor(1);
@@ -131,8 +177,6 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		static_cast<unsigned long long>(RunSeed),
 		static_cast<unsigned long long>(FloorSeed),
 		PawnHP, PawnMax);
-
-	bTransitionPending = false;
 }
 
 void UUegameFloorManager::RequestDescend(bool bForce)
@@ -142,9 +186,9 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 		UE_LOG(LogTemp, Error, TEXT("[FloorManager] no active run (use Dungeon.StartRun <seed>)"));
 		return;
 	}
-	if (bTransitionPending)
+	if (PendingTransition != EPendingTransition::None)
 	{
-		return;
+		return;   // duplicate trigger, or the player already died this tick
 	}
 
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
@@ -163,8 +207,67 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 	{
 		return;
 	}
-	bTransitionPending = true;
+	PendingTransition = EPendingTransition::Descend;
+	World->GetTimerManager().SetTimerForNextTick(
+		FTimerDelegate::CreateWeakLambda(this, [this]() { ExecutePendingTransition(); }));
+}
 
+void UUegameFloorManager::NotifyRunFailed()
+{
+	if (!bRunActive || PendingTransition == EPendingTransition::Fail)
+	{
+		return;   // no run, or this death is already being handled
+	}
+
+	// A death inside a queued descend's one-tick window upgrades that transition: the run
+	// must fail, never continue onto the next floor with a dead pawn. StartFloor() does not
+	// revive, so letting the descend win would strand the run at HP=0 with OnDeath spent.
+	const bool bUpgradedPendingDescend = (PendingTransition == EPendingTransition::Descend);
+
+	// Evidence (acceptance E): lose path.
+	UE_LOG(LogTemp, Display, TEXT("[RunFailed] floor=%d runSeed=%llu%s"),
+		FloorIndex, static_cast<unsigned long long>(RunSeed),
+		bUpgradedPendingDescend ? TEXT(" (death overrides pending descend)") : TEXT(""));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Red,
+			FString::Printf(TEXT("RUN FAILED on floor %d. Restarting with a fresh seed..."), FloorIndex));
+	}
+
+	if (bUpgradedPendingDescend)
+	{
+		PendingTransition = EPendingTransition::Fail;   // reuse the tick RequestDescend queued
+		return;
+	}
+
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (!World)
+	{
+		return;
+	}
+	PendingTransition = EPendingTransition::Fail;
+	World->GetTimerManager().SetTimerForNextTick(
+		FTimerDelegate::CreateWeakLambda(this, [this]() { ExecutePendingTransition(); }));
+}
+
+void UUegameFloorManager::ExecutePendingTransition()
+{
+	const EPendingTransition Kind = PendingTransition;
+	PendingTransition = EPendingTransition::None;
+	if (!bRunActive || Kind == EPendingTransition::None)
+	{
+		return;
+	}
+
+	if (Kind == EPendingTransition::Fail)
+	{
+		RestartRun(TEXT("failed"));
+		return;
+	}
+
+	// Descend. The win check runs at fire time, not request time, so a death that upgraded
+	// the pending transition can never leave a stray [RunWon] behind it.
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 	if (FloorIndex >= Cfg.MaxFloors)
 	{
 		// Evidence (acceptance E): win path.
@@ -175,39 +278,12 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 			GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Green,
 				FString::Printf(TEXT("RUN WON - %d floors! Restarting with a fresh seed..."), FloorIndex));
 		}
-		World->GetTimerManager().SetTimerForNextTick(
-			FTimerDelegate::CreateWeakLambda(this, [this]() { RestartRun(TEXT("won")); }));
+		RestartRun(TEXT("won"));
 	}
 	else
 	{
-		const int32 Next = FloorIndex + 1;
-		World->GetTimerManager().SetTimerForNextTick(
-			FTimerDelegate::CreateWeakLambda(this, [this, Next]() { StartFloor(Next); }));
+		StartFloor(FloorIndex + 1);
 	}
-}
-
-void UUegameFloorManager::NotifyRunFailed()
-{
-	if (!bRunActive || bTransitionPending)
-	{
-		return;
-	}
-	// Evidence (acceptance E): lose path.
-	UE_LOG(LogTemp, Display, TEXT("[RunFailed] floor=%d runSeed=%llu"),
-		FloorIndex, static_cast<unsigned long long>(RunSeed));
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Red,
-			FString::Printf(TEXT("RUN FAILED on floor %d. Restarting with a fresh seed..."), FloorIndex));
-	}
-	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-	if (!World)
-	{
-		return;
-	}
-	bTransitionPending = true;
-	World->GetTimerManager().SetTimerForNextTick(
-		FTimerDelegate::CreateWeakLambda(this, [this]() { RestartRun(TEXT("failed")); }));
 }
 
 void UUegameFloorManager::RestartRun(const TCHAR* Reason)

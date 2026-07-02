@@ -11,6 +11,7 @@
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
 #include "Combat/DungeonStairs.h"
+#include "Combat/FloorManager.h"
 #include "Components/BoxComponent.h"
 #include "Components/BrushComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -21,6 +22,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationSystem.h"
+#include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 
 // Engine-agnostic M1/M2 core, resolved via the repo-root PrivateIncludePaths entry in
@@ -102,7 +104,26 @@ void ADungeonSpawner::BeginPlay()
 
 	if (UWorld* World = GetWorld(); World && World->IsGameWorld())
 	{
-		SpawnStairs();   // M4: descend trigger in the farthest room
+		SpawnStairs();   // M4: descend trigger in the farthest room (no-op until a run is active)
+
+		// M4: gameplay entry into the floor loop. Deferred one tick so the player pawn and
+		// the GameInstance subsystem are guaranteed up; re-checked at fire time because a
+		// run may have been started by then (e.g. the FloorManager's own helper spawner).
+		if (bAutoStartRun)
+		{
+			World->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateWeakLambda(this, [this]()
+				{
+					UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld());
+					if (bAutoStartRun && FM && !FM->IsRunActive())
+					{
+						UE_LOG(LogTemp, Display,
+							TEXT("[Dungeon] AutoStartRun: runSeed=%llu (from spawner seed)"),
+							static_cast<unsigned long long>(GetEffectiveSeed64()));
+						FM->StartRun(GetEffectiveSeed64());
+					}
+				}));
+		}
 	}
 }
 
@@ -353,6 +374,16 @@ void ADungeonSpawner::SpawnStairs()
 	UWorld* World = GetWorld();
 	if (!World || !World->IsGameWorld())
 	{
+		return;
+	}
+
+	// The pad only forwards to RequestDescend(), which no-ops without an active run - so
+	// outside a run (BeginPlay before AutoStartRun fires, forensic Dungeon.Regen) spawning
+	// it would present a dead trigger. Single enforcement point for every call site.
+	const UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!FM || !FM->IsRunActive())
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Stairs] skipped: no active run (pad would be inert)"));
 		return;
 	}
 
