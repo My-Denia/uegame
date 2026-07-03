@@ -50,7 +50,7 @@ m2_adapter.hpp         M2/M3/M4 engine-agnostic adapter: grid→world mapping, c
 uegame/Source/uegame   UE glue: DungeonSpawner (ISM geometry/collision/runtime navmesh),
    │                     FloorManager (GameInstance subsystem: run/floor state machine), Combat/, DungeonStairs
 uegameEditor           MCP toolset (ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 Dungeon.* forensic verbs (11 shipping-gated, 2 M2 commands in all configs)
+                         + 13 Dungeon.* forensic verbs (all shipping-gated, inside !UE_BUILD_SHIPPING)
 ```
 
 Why this split:
@@ -185,7 +185,7 @@ Expect the tail line `Result: Succeeded` (a measured incremental build took 16.7
 
 **Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the FloorManager bootstraps a run after world init with the pinned default seed 7 (`c7deca2`). F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
 
-**Forensic console** (13 verbs, uegame/Source/uegame/DungeonEvidence.cpp:158–494 — 11 inside the `!UE_BUILD_SHIPPING` guard; the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` sit outside it and compile in all configurations):
+**Forensic console** (13 verbs, uegame/Source/uegame/DungeonEvidence.cpp:36–498 — all inside the `!UE_BUILD_SHIPPING` guard, including the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` — none compile into Shipping):
 
 | Verb | Purpose |
 |---|---|
@@ -219,6 +219,7 @@ m2_adapter.hpp          engine-agnostic adapter (hashes, placements, seed chain 
 m1_verify.cpp           independent verifier (public API only; user-supplied)
 m2_adapter_test.cpp     adapter CLI (report/validate/determinism/enemies/floors)
 main.cpp + build.sh     M1 demo CLI
+CLAUDE.md + AGENTS.md   workspace agent rules (semantically aligned; Claude reads CLAUDE, Codex reads AGENTS)
 m2_ue/M2_UE_README.md   M2 engine-integration deep dive (zh-CN: runtime-navmesh forensics, repro commands)
 m2_ue/evidence/         6 evidence screenshots (provenance audited via MD5+timestamps, 6a9858f)
 uegame/                 UE 5.8 project (Source/uegame runtime module, Source/uegameEditor MCP module,

@@ -50,7 +50,7 @@ m2_adapter.hpp         M2/M3/M4 引擎无关适配:格→世界坐标、连通�
 uegame/Source/uegame   UE 胶水:DungeonSpawner(ISM 几何/碰撞/运行时 navmesh)、
    │                     FloorManager(GameInstance 子系统:局/层状态机)、Combat/、DungeonStairs
 uegameEditor           MCP 工具集(ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 个 Dungeon.* 取证动词(11 个 shipping-gated,2 个 M2 命令全配置编译)
+                         + 13 个 Dungeon.* 取证动词(全部 shipping-gated,在 !UE_BUILD_SHIPPING 门内)
 ```
 
 为什么这么切:
@@ -185,7 +185,7 @@ git clone https://github.com/My-Denia/uegame.git
 
 **玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:FloorManager 在世界初始化后自举一局,钉住的默认种子 7(`c7deca2`)。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
 
-**取证控制台**(13 个动词,uegame/Source/uegame/DungeonEvidence.cpp:158–494——其中 11 个在 `!UE_BUILD_SHIPPING` 门内;M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar` 在门外,编译进所有配置):
+**取证控制台**(13 个动词,uegame/Source/uegame/DungeonEvidence.cpp:36–498——全部在 `!UE_BUILD_SHIPPING` 门内,含 M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar`,不再编译进 Shipping):
 
 | 动词 | 用途 |
 |---|---|
@@ -219,6 +219,7 @@ m2_adapter.hpp          引擎无关适配层(M2/M3/M4 的哈希、布点、种�
 m1_verify.cpp           独立验证器(仅公共 API;用户提供)
 m2_adapter_test.cpp     适配层 CLI(report/validate/determinism/enemies/floors)
 main.cpp + build.sh     M1 演示 CLI
+CLAUDE.md + AGENTS.md   工作区 agent 操作纪律(两侧语义对齐:Claude 读 CLAUDE,Codex 读 AGENTS)
 m2_ue/M2_UE_README.md   M2 引擎集成深潜(中文:运行时 navmesh 排障三连、复现命令)
 m2_ue/evidence/         6 张取证截图(provenance 经 MD5+时间戳审计,6a9858f)
 uegame/                 UE 5.8 工程(Source/uegame 运行时模块、Source/uegameEditor MCP 模块、
