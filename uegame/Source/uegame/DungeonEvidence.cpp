@@ -14,6 +14,7 @@
 #include "DungeonSpawner.h"
 
 #include "Combat/CombatComponent.h"
+#include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
@@ -24,8 +25,14 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+
+// Engine-agnostic scaling math (floorMultiplier/scaledEnemiesPerRoom), so BalanceReport echoes
+// the SAME per-floor factors StartFloor() applies - zero duplicated constants. .cpp-only include
+// (repo-root PrivateIncludePaths); this file has no UHT reflection, so no unity/std leakage.
+#include "m2_adapter.hpp"
 
 namespace
 {
@@ -388,6 +395,25 @@ void DungeonStartRunCmd(const TArray<FString>& Args, UWorld* World)
 	}
 }
 
+void DungeonSetRunSeedCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || !World->IsGameWorld() || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage (game worlds only): Dungeon.SetRunSeed <uint64 seed>"));
+		return;
+	}
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		const uint64 Seed = FCString::Strtoui64(*Args[0], nullptr, 10);
+		// Pin the first-run seed and (re)start through the RESOLVER, so the reproducibility path
+		// exercises the same entry as the shipping build: [RunSeed] source=explicit -> [RunStarted].
+		// Unlike Dungeon.StartRun (which sets the seed directly), this proves the entry path itself
+		// honors a pinned seed - the demonstration for acceptance C(b).
+		FM->SetExplicitFirstSeed(Seed);
+		FM->StartRun(FM->ResolveFirstRunSeed());
+	}
+}
+
 void DungeonDescendCmd(const TArray<FString>& /*Args*/, UWorld* World)
 {
 	if (!World)
@@ -436,13 +462,46 @@ void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
 {
 	if (!World || Args.Num() < 1)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.SetHP <n>"));
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.SetHP <n> [holdSeconds]"));
 		return;
 	}
 	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
-	if (UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr)
+	UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!HP)
 	{
-		HP->SetHP(FCString::Atof(*Args[0]));   // test-only cheat, like KillNearest
+		return;
+	}
+	HP->SetHP(FCString::Atof(*Args[0]));   // test-only cheat, like KillNearest
+
+	// Optional invincibility hold (acceptance F survival probe): an in-handler ticker re-tops
+	// the pawn to full whenever it drops, firing far faster than the enemy 0.5s contact tick,
+	// so a standing/walking pawn survives a multi-second WalkFar walk. In-handler composite
+	// (repo rule: continuous forensic effects must not rely on external per-tick command pacing).
+	const float HoldSec = (Args.Num() > 1) ? FCString::Atof(*Args[1]) : 0.0f;
+	if (HoldSec > 0.0f)
+	{
+		TWeakObjectPtr<UHealthComponent> WeakHP = HP;
+		const double StartTime = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display,
+			TEXT("[DungeonEvidence] SetHP invincibility hold armed=%.1fs (re-top to full on any drop)"), HoldSec);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+			[WeakHP, StartTime, HoldSec](float) -> bool
+			{
+				if (!WeakHP.IsValid())
+				{
+					return false;
+				}
+				if (WeakHP->GetHP() < WeakHP->GetMaxHP())
+				{
+					WeakHP->SetHP(WeakHP->GetMaxHP());   // top up only after damage (limits log noise)
+				}
+				if (FPlatformTime::Seconds() - StartTime >= HoldSec)
+				{
+					UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] SetHP invincibility hold expired"));
+					return false;
+				}
+				return true;
+			}), 0.1f);
 	}
 }
 
@@ -475,6 +534,11 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonStartRunCmd(
 	TEXT("Begin an M4 run at floor 1: Dungeon.StartRun <uint64 runSeed>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonStartRunCmd));
 
+FAutoConsoleCommandWithWorldAndArgs GDungeonSetRunSeedCmd(
+	TEXT("Dungeon.SetRunSeed"),
+	TEXT("Pin the first-run seed and restart via the entry resolver (reproducibility): Dungeon.SetRunSeed <seed>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonSetRunSeedCmd));
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonDescendCmd(
 	TEXT("Dungeon.Descend"),
 	TEXT("Force a floor transition (bypasses the clear-gate policy; forensic)"),
@@ -494,6 +558,136 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonDescendThenDieCmd(
 	TEXT("Dungeon.DescendThenDie"),
 	TEXT("Forensic: force-descend and kill the player in the SAME tick (pending-window probe)"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonDescendThenDieCmd));
+
+// --- Playability verb: objective-floor instrumentation ---
+
+void DungeonBalanceReportCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	// Pure-DataTable math block: every number below traces to the combat row (echoed once by
+	// FUegameCombatConfig). Objectives 2 (melee TTK) and 4 (floor-scaling K=2 drain ratio) are
+	// fully decidable here; objectives 1 (first-contact) and 3 (standing survival) are empirical
+	// and measured by the standing probe armed at the end (needs an active run).
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	const float PerEnemyDPS =
+		(Cfg.EnemyDamageInterval > 0.0f) ? (Cfg.EnemyContactDamage / Cfg.EnemyDamageInterval) : 0.0f;
+	const int32 MaxFloors = FMath::Max(1, Cfg.MaxFloors);
+
+	UE_LOG(LogTemp, Display, TEXT("[BalanceReport] === DataTable math (source=%s) ==="),
+		FUegameCombatConfig::IsFromDataTable() ? TEXT("CSV") : TEXT("compiled-fallback"));
+	UE_LOG(LogTemp, Display,
+		TEXT("[BalanceReport] player{HP=%.0f atkDmg=%.0f range=%.0f cd=%.2f} enemy{HP=%.0f spd=%.0f dmg=%.0f interval=%.2f} perRoom=%d scaling=%.2f perEnemyDPS=%.2f"),
+		Cfg.PlayerMaxHP, Cfg.PlayerAttackDamage, Cfg.PlayerAttackRange, Cfg.PlayerAttackCooldown,
+		Cfg.EnemyMaxHP, Cfg.EnemyMoveSpeed, Cfg.EnemyContactDamage, Cfg.EnemyDamageInterval,
+		Cfg.EnemiesPerRoom, Cfg.PerFloorScaling, PerEnemyDPS);
+
+	double Floor1_K2_rate = -1.0, FloorLast_K2_rate = -1.0;
+	for (int32 F = 1; F <= MaxFloors; ++F)
+	{
+		const double Mult = m2::floorMultiplier(F, Cfg.PerFloorScaling);
+		const int32 EffPerRoom = m2::scaledEnemiesPerRoom(Cfg.EnemiesPerRoom, F, Cfg.PerFloorScaling);
+		const float EffHP = static_cast<float>(Cfg.EnemyMaxHP * Mult);
+		const int32 TTK = (Cfg.PlayerAttackDamage > 0.0f)
+			? FMath::CeilToInt(EffHP / Cfg.PlayerAttackDamage) : -1;
+		// Incoming drain RATE (HP/s) if K enemies converge = K * perEnemyDPS (contact dmg is
+		// floor-invariant: only count/HP scale, so K=2 rate is identical across floors).
+		const double DrainTimeK1 = (PerEnemyDPS > 0.0) ? (Cfg.PlayerMaxHP / (1.0 * PerEnemyDPS)) : -1.0;
+		const double DrainTimeK2 = (PerEnemyDPS > 0.0) ? (Cfg.PlayerMaxHP / (2.0 * PerEnemyDPS)) : -1.0;
+		const double DrainTimeK4 = (PerEnemyDPS > 0.0) ? (Cfg.PlayerMaxHP / (4.0 * PerEnemyDPS)) : -1.0;
+		if (F == 1) { Floor1_K2_rate = 2.0 * PerEnemyDPS; }
+		if (F == MaxFloors) { FloorLast_K2_rate = 2.0 * PerEnemyDPS; }
+		UE_LOG(LogTemp, Display,
+			TEXT("[BalanceReport] floor=%d effPerRoom=%d effHP=%.0f meleeTTK=%d swings | timeToDrain K1=%.1fs K2=%.1fs K4=%.1fs"),
+			F, EffPerRoom, EffHP, TTK, DrainTimeK1, DrainTimeK2, DrainTimeK4);
+	}
+
+	const int32 TTK1 = (Cfg.PlayerAttackDamage > 0.0f)
+		? FMath::CeilToInt(Cfg.EnemyMaxHP / Cfg.PlayerAttackDamage) : -1;
+	const double RateRatio = (Floor1_K2_rate > 0.0) ? (FloorLast_K2_rate / Floor1_K2_rate) : -1.0;
+	UE_LOG(LogTemp, Display, TEXT("[BalanceReport] === objective floors ==="));
+	UE_LOG(LogTemp, Display, TEXT("[BalanceReport] OBJ2 meleeTTK(floor1)=%d swings  (<=3 => %s)"),
+		TTK1, (TTK1 >= 0 && TTK1 <= 3) ? TEXT("GREEN") : TEXT("RED"));
+	UE_LOG(LogTemp, Display,
+		TEXT("[BalanceReport] OBJ4 floorLast-K2 rate / floor1-K2 rate = %.2fx  (<=2x => %s)"),
+		RateRatio, (RateRatio > 0.0 && RateRatio <= 2.0) ? TEXT("GREEN") : TEXT("RED"));
+	UE_LOG(LogTemp, Display,
+		TEXT("[BalanceReport] OBJ1 first-contact(>=10s) & OBJ3 standing-survival(>=45s): see [BalanceProbe] below (empirical)"));
+
+	// --- Standing probe: the ONE PIE actual per the contract (first-contact), plus survival.
+	// The forensic pawn takes no input, so this measures approach time (spawn-room-free rule)
+	// and how long a stationary player lasts. First-contact is a sustained state (reliable to
+	// poll); survival is inferred from the run restarting (RunSeed changes on death - a standing
+	// player cannot win), which is a persistent signal a coarse poll cannot miss.
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	APawn* Player = World && World->GetFirstPlayerController()
+		? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (!FM || !FM->IsRunActive() || !Player)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[BalanceProbe] no active run/player - start a run (Dungeon.StartRun <seed>) then re-run BalanceReport for OBJ1/OBJ3"));
+		return;
+	}
+
+	TWeakObjectPtr<UWorld> WeakWorld = World;
+	TWeakObjectPtr<APawn> WeakPlayer = Player;
+	const uint64 InitialRunSeed = FM->GetRunSeed();
+	const double StartTime = FPlatformTime::Seconds();
+	TSharedRef<bool> bContactLogged = MakeShared<bool>(false);
+	UE_LOG(LogTemp, Display,
+		TEXT("[BalanceProbe] armed on floor %d runSeed=%llu (standing, no input): timing first-contact + survival"),
+		FM->GetFloorIndex(), static_cast<unsigned long long>(InitialRunSeed));
+
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+		[WeakWorld, WeakPlayer, InitialRunSeed, StartTime, bContactLogged](float) -> bool
+		{
+			UWorld* W = WeakWorld.Get();
+			APawn* P = WeakPlayer.Get();
+			if (!W || !P)
+			{
+				return false;   // PIE ended
+			}
+			UUegameFloorManager* FM2 = UUegameFloorManager::Get(W);
+			if (!FM2)
+			{
+				return false;
+			}
+			const double Elapsed = FPlatformTime::Seconds() - StartTime;
+
+			if (!*bContactLogged)
+			{
+				float Nearest = TNumericLimits<float>::Max();
+				for (TActorIterator<ADungeonEnemy> It(W); It; ++It)
+				{
+					Nearest = FMath::Min(Nearest,
+						static_cast<float>(FVector::Dist2D((*It)->GetActorLocation(), P->GetActorLocation())));
+				}
+				if (Nearest <= 130.0f)   // ~enemy contact reach (capsule sum + slack)
+				{
+					*bContactLogged = true;
+					UE_LOG(LogTemp, Display,
+						TEXT("[BalanceProbe] firstContact elapsed=%.1fs nearestDist=%.0f"), Elapsed, Nearest);
+				}
+			}
+
+			if (FM2->GetRunSeed() != InitialRunSeed)
+			{
+				UE_LOG(LogTemp, Display,
+					TEXT("[BalanceProbe] standingSurvival elapsed=%.1fs (run restarted => standing death)"), Elapsed);
+				return false;
+			}
+			if (Elapsed > 180.0)
+			{
+				UE_LOG(LogTemp, Display,
+					TEXT("[BalanceProbe] standingSurvival >180s (still alive; stopping probe)"));
+				return false;
+			}
+			return true;
+		}), 0.25f);
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonBalanceReportCmd(
+	TEXT("Dungeon.BalanceReport"),
+	TEXT("Echo per-floor combat math (TTK, K=1/2/4 drain, scaling) + arm the standing first-contact/survival probe"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonBalanceReportCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

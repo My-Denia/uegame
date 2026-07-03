@@ -50,7 +50,7 @@ m2_adapter.hpp         M2/M3/M4 引擎无关适配:格→世界坐标、连通�
 uegame/Source/uegame   UE 胶水:DungeonSpawner(ISM 几何/碰撞/运行时 navmesh)、
    │                     FloorManager(GameInstance 子系统:局/层状态机)、Combat/、DungeonStairs
 uegameEditor           MCP 工具集(ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 个 Dungeon.* 取证动词(全部 shipping-gated,在 !UE_BUILD_SHIPPING 门内)
+                         + 15 个 Dungeon.* 取证动词(全部 shipping-gated,在 !UE_BUILD_SHIPPING 门内)
 ```
 
 为什么这么切:
@@ -183,15 +183,16 @@ git clone https://github.com/My-Denia/uegame.git
 
 预期尾行 `Result: Succeeded`(增量构建实测 16.75s,`8eabc1b`)。`<UE_5.8 安装根>` 即 Epic Launcher 安装 UE_5.8 的目录(Launcher 默认 `C:\Program Files\Epic Games\UE_5.8`;本仓库取证机装在 `(x86)` 变体路径下,以你机器的实际路径为准)。注意:编辑器开着时 Live Coding 会挡 UBT,先关编辑器(`8eabc1b`)。
 
-**玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:FloorManager 在世界初始化后自举一局,钉住的默认种子 7(`c7deca2`)。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
+**玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:地图内摆放的 DungeonSpawner(出货入口)在 BeginPlay 起一局,首局种子默认熵源随机(`[RunSeed] source=entropy`);可复现走 `Dungeon.SetRunSeed 7` 或配 `bUseFixedFirstSeed=true`(demo 钉种子 7)。无 spawner 的地图仍由 FloorManager 自举兜底。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
 
-**取证控制台**(13 个动词,uegame/Source/uegame/DungeonEvidence.cpp:36–498——全部在 `!UE_BUILD_SHIPPING` 门内,含 M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar`,不再编译进 Shipping):
+**取证控制台**(15 个动词,uegame/Source/uegame/DungeonEvidence.cpp:43–692——全部在 `!UE_BUILD_SHIPPING` 门内,含 M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar`,不再编译进 Shipping):
 
 | 动词 | 用途 |
 |---|---|
-| `Dungeon.StartRun <seed>` | 起一局并锚定种子链(幂等,链漂移后重锚用) |
+| `Dungeon.StartRun <seed>` / `Dungeon.SetRunSeed <n>` | 起一局并锚定种子链(直接) / 钉首局种子并经入口 resolver 重开(复现入口路径) |
 | `Dungeon.Descend` / `Dungeon.FloorStatus` | 排队下楼 / 层·HP·敌数快照 |
-| `Dungeon.SetHP <v>` / `Dungeon.DescendThenDie` | 设 HP(0 触发死亡)/ 同帧下楼+致死复合探针 |
+| `Dungeon.SetHP <v> [holdSec]` / `Dungeon.DescendThenDie` | 设 HP(0 触发死亡;holdSec 开无敌保持)/ 同帧下楼+致死复合探针 |
+| `Dungeon.BalanceReport` | 逐层战斗数值(TTK、K=1/2/4 沥血、缩放)+ 站桩首接触/存活探针 |
 | `Dungeon.Regen <seed>` | 原地重生成(M4 spike 验证路径) |
 | `Dungeon.Spawn <seed> [tile]` / `Dungeon.WalkFar` | 单层生成(拒绝编辑器世界)/ 寻路取证+实走最远房 |
 | `Dungeon.CombatStatus` / `Dungeon.Attack` / `Dungeon.KillNearest` | 战斗快照 / 出刀 / 击杀最近敌 |

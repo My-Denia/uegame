@@ -11,6 +11,9 @@
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/PlatformTime.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/DateTime.h"
 #include "TimerManager.h"
 
 // Engine-agnostic seed pipeline (repo root include path; .cpp-only include).
@@ -18,17 +21,55 @@
 
 namespace
 {
-	// Run seed for maps with no pre-placed spawner: the cross-compiler pinned forensic
-	// seed, so a fresh install's first run IS the pre-registered reference run. Restarts
-	// chain away from it deterministically via m2::nextRunSeed.
-	constexpr uint64 kDefaultRunSeed = 7;
+	// Demo/portfolio seed: the cross-compiler pinned forensic seed. Used only when
+	// bUseFixedFirstSeed is set (or as the explicit reproducibility target); the DEFAULT
+	// first-run seed is now entropy (ResolveFirstRunSeed). Restarts chain deterministically
+	// via m2::nextRunSeed regardless of how the first seed was picked.
+	constexpr uint64 kDemoRunSeed = 7;
 }
 
 void UUegameFloorManager::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+	// Portfolio/demo mode: pin the first run to seed 7 without any console command.
+	// Default false => the first run is entropy-seeded (a fresh install gets a random dungeon).
+	if (GConfig)
+	{
+		GConfig->GetBool(TEXT("/Script/uegame.UegameFloorManager"),
+			TEXT("bUseFixedFirstSeed"), bUseFixedFirstSeed, GGameIni);
+	}
 	ActorsInitializedHandle = FWorldDelegates::OnWorldInitializedActors.AddUObject(
 		this, &UUegameFloorManager::OnWorldActorsInitialized);
+}
+
+uint64 UUegameFloorManager::ResolveFirstRunSeed()
+{
+	if (ExplicitFirstSeed.IsSet())
+	{
+		const uint64 S = ExplicitFirstSeed.GetValue();
+		UE_LOG(LogTemp, Display, TEXT("[RunSeed] source=explicit value=%llu"),
+			static_cast<unsigned long long>(S));
+		return S;
+	}
+	if (bUseFixedFirstSeed)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[RunSeed] source=fixed-demo value=%llu"),
+			static_cast<unsigned long long>(kDemoRunSeed));
+		return kDemoRunSeed;
+	}
+
+	// === THE single entropy point (contract F, amended). This is the only place in gameplay
+	// that reads a clock to pick a seed. Two independent clock sources XOR'd then splitmix64-
+	// mixed so low-entropy wall-clock bits spread across all 64 bits. Everything downstream
+	// (deriveFloorSeed per floor, nextRunSeed per restart) is a pure integer function of this
+	// value, so the whole run stays reproducible once the seed is known/logged. ===
+	const uint64 Entropy =
+		static_cast<uint64>(FDateTime::Now().GetTicks()) ^
+		(static_cast<uint64>(FPlatformTime::Cycles64()) * 0x9E3779B97F4A7C15ULL);
+	const uint64 Seed = m2::mix64(Entropy);
+	UE_LOG(LogTemp, Display, TEXT("[RunSeed] source=entropy value=%llu"),
+		static_cast<unsigned long long>(Seed));
+	return Seed;
 }
 
 void UUegameFloorManager::Deinitialize()
@@ -47,15 +88,18 @@ void UUegameFloorManager::OnWorldActorsInitialized(const FActorsInitializedParam
 	// One tick later the player pawn exists. A level-placed spawner takes precedence:
 	// this side yields whenever FindSpawner() sees one (that spawner's own bAutoStartRun
 	// decides), and both sides re-check bRunActive, so double-starts are impossible.
+	// Bootstrap is the shipping-safe fallback for spawner-less maps; its seed comes from the
+	// single resolver (entropy by default), NOT a hard-coded 7.
 	World->GetTimerManager().SetTimerForNextTick(
 		FTimerDelegate::CreateWeakLambda(this, [this]()
 		{
 			if (!bRunActive && !FindSpawner())
 			{
+				const uint64 Seed = ResolveFirstRunSeed();
 				UE_LOG(LogTemp, Display,
-					TEXT("[Dungeon] AutoStartRun: runSeed=%llu (default; no spawner in level)"),
-					static_cast<unsigned long long>(kDefaultRunSeed));
-				StartRun(kDefaultRunSeed);
+					TEXT("[Dungeon] AutoStartRun: runSeed=%llu (bootstrap; no spawner in level)"),
+					static_cast<unsigned long long>(Seed));
+				StartRun(Seed);
 			}
 		}));
 }

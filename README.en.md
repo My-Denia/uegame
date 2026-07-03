@@ -50,7 +50,7 @@ m2_adapter.hpp         M2/M3/M4 engine-agnostic adapter: grid→world mapping, c
 uegame/Source/uegame   UE glue: DungeonSpawner (ISM geometry/collision/runtime navmesh),
    │                     FloorManager (GameInstance subsystem: run/floor state machine), Combat/, DungeonStairs
 uegameEditor           MCP toolset (ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 Dungeon.* forensic verbs (all shipping-gated, inside !UE_BUILD_SHIPPING)
+                         + 15 Dungeon.* forensic verbs (all shipping-gated, inside !UE_BUILD_SHIPPING)
 ```
 
 Why this split:
@@ -183,15 +183,16 @@ git clone https://github.com/My-Denia/uegame.git
 
 Expect the tail line `Result: Succeeded` (a measured incremental build took 16.75s, `8eabc1b`). `<UE_5.8 install root>` is wherever the Epic Launcher installed UE_5.8 (Launcher default `C:\Program Files\Epic Games\UE_5.8`; the machine that produced this repo's evidence has it under the `(x86)` variant — use your actual path). Note: UBT refuses to build while the editor's Live Coding is active — close the editor first (`8eabc1b`).
 
-**Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the FloorManager bootstraps a run after world init with the pinned default seed 7 (`c7deca2`). F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
+**Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the placed DungeonSpawner (the shipping entry) starts a run at BeginPlay; the first-run seed is entropy by default (`[RunSeed] source=entropy`), reproducible via `Dungeon.SetRunSeed 7` or `bUseFixedFirstSeed=true` (demo seed 7). Spawner-less maps still fall back to the FloorManager bootstrap. F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
 
-**Forensic console** (13 verbs, uegame/Source/uegame/DungeonEvidence.cpp:36–498 — all inside the `!UE_BUILD_SHIPPING` guard, including the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` — none compile into Shipping):
+**Forensic console** (15 verbs, uegame/Source/uegame/DungeonEvidence.cpp:43–692 — all inside the `!UE_BUILD_SHIPPING` guard, including the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` — none compile into Shipping):
 
 | Verb | Purpose |
 |---|---|
-| `Dungeon.StartRun <seed>` | Start a run and anchor the seed chain (idempotent; re-anchor after chain drift) |
+| `Dungeon.StartRun <seed>` / `Dungeon.SetRunSeed <n>` | Start a run directly at a seed / pin the first-run seed and restart via the entry resolver (reproducible entry path) |
 | `Dungeon.Descend` / `Dungeon.FloorStatus` | Queue a descend / floor·HP·enemy snapshot |
-| `Dungeon.SetHP <v>` / `Dungeon.DescendThenDie` | Set player HP (0 triggers death) / same-tick descend+lethal compound probe |
+| `Dungeon.SetHP <v> [holdSec]` / `Dungeon.DescendThenDie` | Set player HP (0 triggers death; holdSec arms an invincibility hold) / same-tick descend+lethal compound probe |
+| `Dungeon.BalanceReport` | Per-floor combat math (TTK, K=1/2/4 drain, scaling) + standing first-contact/survival probe |
 | `Dungeon.Regen <seed>` | In-place regeneration (the M4 spike path) |
 | `Dungeon.Spawn <seed> [tile]` / `Dungeon.WalkFar` | Single-floor spawn (refuses editor worlds) / navpath evidence + walk to farthest room |
 | `Dungeon.CombatStatus` / `Dungeon.Attack` / `Dungeon.KillNearest` | Combat snapshot / one melee swing / kill nearest enemy |
