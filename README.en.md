@@ -111,7 +111,7 @@ FloorManager (a GameInstance subsystem) owns {runSeed, floorIndex}; floor transi
 |---|---|
 | Pre-registration: runSeed=7 floor seeds, layout hashes, enemy hashes and scaling values for all 3 floors — plus nextRunSeed and a counterexample (runSeed=8 floor-1 hash differs) — recorded in the commit before any PIE run | `8a4929c` |
 | Navigation survives in-place regeneration: floor-2 layout hash reproduces the pre-registered value; enemies re-path RequestSuccessful, nearestDist 2000+→81 | `5824e68` |
-| Full chain reproduced after the review-fix round: zero-console-input auto-start reproduces the run-7 chain; all six hashes match; [RunWon] yields the g++-matching nextRunSeed | `c7deca2` |
+| Full chain reproduced after the review-fix round: zero-console-input auto-start reproduces the run-7 chain; all six hashes match; `[RunWon]` is followed by `[RunRestart]` carrying the g++-matching next runSeed (FloorManager.cpp:274/293) | `c7deca2` |
 | Scaling is data-driven: floor 3 runs 6 enemies/room at effHP=90; formula and DataTable echo logged per floor in [FloorConfig] | `1ec27c4`; PR #3 |
 | HP persists across floors: [FloorStarted] floor=2 playerHP=23/100 | PR #3 |
 | Seed chain reproduced across 3 independent sessions and checked against g++ by an independent auditor | PR #3 |
@@ -177,11 +177,11 @@ Prerequisites: Windows 10/11; UE 5.8 (Epic Games Launcher); Visual Studio 2022 w
 
 ```
 git clone https://github.com/My-Denia/uegame.git
-"C:\Program Files (x86)\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" ^
+"<UE_5.8 install root>\Engine\Build\BatchFiles\Build.bat" ^
   uegameEditor Win64 Development -project="<repo>\uegame\uegame.uproject" -WaitMutex
 ```
 
-Expect the tail line `Result: Succeeded` (a measured incremental build took 16.75s, `8eabc1b`). Note: UBT refuses to build while the editor's Live Coding is active — close the editor first (`8eabc1b`).
+Expect the tail line `Result: Succeeded` (a measured incremental build took 16.75s, `8eabc1b`). `<UE_5.8 install root>` is wherever the Epic Launcher installed UE_5.8 (Launcher default `C:\Program Files\Epic Games\UE_5.8`; the machine that produced this repo's evidence has it under the `(x86)` variant — use your actual path). Note: UBT refuses to build while the editor's Live Coding is active — close the editor first (`8eabc1b`).
 
 **Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the FloorManager bootstraps a run after world init with the pinned default seed 7 (`c7deca2`). F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
 
@@ -197,7 +197,7 @@ Expect the tail line `Result: Succeeded` (a measured incremental build took 16.7
 | `Dungeon.CombatStatus` / `Dungeon.Attack` / `Dungeon.KillNearest` | Combat snapshot / one melee swing / kill nearest enemy |
 | `Dungeon.TeleportToRoom <n>` / `Dungeon.FaceNearest` | Teleport to room n / face nearest enemy (for the forward-offset melee) |
 
-Logs land in `uegame/Saved/Logs/uegame.log`; grep anchors: [RunStarted] [FloorConfig] [FloorStarted] [FloorCompleted] [RunWon] [RunFailed] [Stairs] [RoomClear] (anchor list quoted in the `1ec27c4`/`c7deca2` bodies).
+Logs land in `uegame/Saved/Logs/uegame.log`; grep anchors: `[RunStarted]` `[FloorConfig]` `[FloorStarted]` `[FloorCompleted]` `[RunWon]` `[RunFailed]` `[RunRestart]` `[Stairs]` `[RoomClear]` (registered as UE_LOGs in FloorManager.cpp and the DungeonSpawner/Combat sources; quoted in the `1ec27c4`/`c7deca2` bodies).
 
 **Outside the engine (independent re-verification).** No UE needed — any C++17 compiler:
 

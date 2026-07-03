@@ -111,7 +111,7 @@ FloorManager(GameInstance 子系统)持有 {runSeed, floorIndex};层切换走单
 |---|---|
 | 预注册:runSeed=7 三层的层种子、布局哈希、敌人哈希、缩放数值,连同 nextRunSeed 与反例(runSeed=8 首层哈希不同),全部在任何 PIE 运行之前录入提交 | `8a4929c` |
 | 原地重生成后导航存活:floor2 布局哈希复现预注册值;敌人重新寻路 RequestSuccessful,nearestDist 2000+→81 | `5824e68` |
-| 评审修复轮之后全链复现:零控制台输入自启即重现 run-7 链;六哈希全中;[RunWon] 给出与 g++ 一致的 nextRunSeed | `c7deca2` |
+| 评审修复轮之后全链复现:零控制台输入自启即重现 run-7 链;六哈希全中;`[RunWon]` 后随的 `[RunRestart]` 携带与 g++ 一致的新 runSeed(FloorManager.cpp:274/293) | `c7deca2` |
 | 缩放数据驱动:floor 3 时 6 敌/房、effHP=90,公式与 DataTable 回显逐层打进 [FloorConfig] | `1ec27c4`;PR #3 |
 | HP 跨层保留:[FloorStarted] floor=2 playerHP=23/100 | PR #3 |
 | 种子链跨 3 个独立会话复现,并由独立 auditor 对照 g++ 复核 | PR #3 |
@@ -177,11 +177,11 @@ FloorManager(GameInstance 子系统)持有 {runSeed, floorIndex};层切换走单
 
 ```
 git clone https://github.com/My-Denia/uegame.git
-"C:\Program Files (x86)\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" ^
+"<UE_5.8 安装根>\Engine\Build\BatchFiles\Build.bat" ^
   uegameEditor Win64 Development -project="<repo>\uegame\uegame.uproject" -WaitMutex
 ```
 
-预期尾行 `Result: Succeeded`(增量构建实测 16.75s,`8eabc1b`)。注意:编辑器开着时 Live Coding 会挡 UBT,先关编辑器(`8eabc1b`)。
+预期尾行 `Result: Succeeded`(增量构建实测 16.75s,`8eabc1b`)。`<UE_5.8 安装根>` 即 Epic Launcher 安装 UE_5.8 的目录(Launcher 默认 `C:\Program Files\Epic Games\UE_5.8`;本仓库取证机装在 `(x86)` 变体路径下,以你机器的实际路径为准)。注意:编辑器开着时 Live Coding 会挡 UBT,先关编辑器(`8eabc1b`)。
 
 **玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:FloorManager 在世界初始化后自举一局,钉住的默认种子 7(`c7deca2`)。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
 
@@ -197,7 +197,7 @@ git clone https://github.com/My-Denia/uegame.git
 | `Dungeon.CombatStatus` / `Dungeon.Attack` / `Dungeon.KillNearest` | 战斗快照 / 出刀 / 击杀最近敌 |
 | `Dungeon.TeleportToRoom <n>` / `Dungeon.FaceNearest` | 传送到房 n / 面向最近敌(近战前向偏移用) |
 
-日志在 `uegame/Saved/Logs/uegame.log`,grep 锚:[RunStarted] [FloorConfig] [FloorStarted] [FloorCompleted] [RunWon] [RunFailed] [Stairs] [RoomClear](锚点清单引用见 `1ec27c4`/`c7deca2` 正文)。
+日志在 `uegame/Saved/Logs/uegame.log`,grep 锚:`[RunStarted]` `[FloorConfig]` `[FloorStarted]` `[FloorCompleted]` `[RunWon]` `[RunFailed]` `[RunRestart]` `[Stairs]` `[RoomClear]`(注册于 FloorManager.cpp 与 DungeonSpawner/Combat 各处 UE_LOG;引用见 `1ec27c4`/`c7deca2` 正文)。
 
 **引擎之外(独立复验侧)。** 不需要 UE,任何 C++17 编译器:
 
