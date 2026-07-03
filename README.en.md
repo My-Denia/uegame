@@ -50,13 +50,13 @@ m2_adapter.hpp         M2/M3/M4 engine-agnostic adapter: grid→world mapping, c
 uegame/Source/uegame   UE glue: DungeonSpawner (ISM geometry/collision/runtime navmesh),
    │                     FloorManager (GameInstance subsystem: run/floor state machine), Combat/, DungeonStairs
 uegameEditor           MCP toolset (ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 Dungeon.* forensic verbs (all !UE_BUILD_SHIPPING)
+                         + 13 Dungeon.* forensic verbs (11 shipping-gated, 2 M2 commands in all configs)
 ```
 
 Why this split:
 
 - **The core predates the engine.** When the adapter layer was built and g++-verified, this machine had no UE installed — the commit body says so verbatim: "no UE on this machine, not compiled" (`822dfa4`; the same fact recorded again in `2455032`). The algorithm's correctness never depended on an engine being present.
-- **One source, two compilers checking each other.** `dungeon.hpp`/`m2_adapter.hpp` stay at the repo root and are compiled both by the standalone WSL g++ build and by UE's MSVC build (`2455032`). The same seed must print bit-identical hashes on both sides — determinism is a checked property, not a hoped-for one.
+- **One source, two compilers checking each other.** `dungeon.hpp`/`m2_adapter.hpp` stay at the repo root and are compiled both by the standalone WSL g++ build and by UE's MSVC build (include-path wiring in `2455032`; MSVC-side compilation verified in `8eabc1b`). The same seed must print bit-identical hashes on both sides — determinism is a checked property, not a hoped-for one.
 - **Reflection isolation.** Both headers are included from .cpp files only, never from any UHT reflection header ([M2_UE_README L40–42](m2_ue/M2_UE_README.md)); UE's unity build and IWYU cannot leak into the core.
 - **Single source for numbers.** All combat and progression values come from [uegame/Content/Data/CombatConfig.csv](uegame/Content/Data/CombatConfig.csv) — loaded at runtime, echoed once on load, loud fallback if missing (`593a88b`), staged as NonUFS loose files for packaged builds (`4358a35`).
 - **RNG discipline.** Every random draw comes from a single explicitly-seeded `std::mt19937_64`; no time-based seeding, no global rand, no static mutable state (dungeon.hpp header). Enemy placement uses a `seed ^ 0x9E3779B97F4A7C15` sub-stream so the layout stream is untouched (`048ad06`); the floor-seed chain is a pure-integer splitmix64 pipeline that consumes no RNG stream at all (`8a4929c`).
@@ -185,7 +185,7 @@ Expect the tail line `Result: Succeeded` (a measured incremental build took 16.7
 
 **Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the FloorManager bootstraps a run after world init with the pinned default seed 7 (`c7deca2`). F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
 
-**Forensic console** (13 verbs, all `!UE_BUILD_SHIPPING`, uegame/Source/uegame/DungeonEvidence.cpp:157–490):
+**Forensic console** (13 verbs, uegame/Source/uegame/DungeonEvidence.cpp:158–494 — 11 inside the `!UE_BUILD_SHIPPING` guard; the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` sit outside it and compile in all configurations):
 
 | Verb | Purpose |
 |---|---|

@@ -50,13 +50,13 @@ m2_adapter.hpp         M2/M3/M4 引擎无关适配:格→世界坐标、连通�
 uegame/Source/uegame   UE 胶水:DungeonSpawner(ISM 几何/碰撞/运行时 navmesh)、
    │                     FloorManager(GameInstance 子系统:局/层状态机)、Combat/、DungeonStairs
 uegameEditor           MCP 工具集(ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 个 Dungeon.* 取证动词(全部 !UE_BUILD_SHIPPING)
+                         + 13 个 Dungeon.* 取证动词(11 个 shipping-gated,2 个 M2 命令全配置编译)
 ```
 
 为什么这么切:
 
 - **核心先于引擎存在**。适配层建成并通过 g++ 验证时,这台机器上还没有装 UE——提交正文原话 "no UE on this machine, not compiled"(`822dfa4`;同一事实在 `2455032` 再次记录)。算法的正确性从不依赖引擎在场。
-- **一份源码,两个编译器互证**。`dungeon.hpp`/`m2_adapter.hpp` 留在仓库根,同时被 WSL g++ 独立构建和 UE 的 MSVC 构建编译(`2455032`)。同种子在两边必须打出逐位相同的哈希——确定性是被检查的性质,不是被祈祷的性质。
+- **一份源码,两个编译器互证**。`dungeon.hpp`/`m2_adapter.hpp` 留在仓库根,同时被 WSL g++ 独立构建和 UE 的 MSVC 构建编译(include 路径接线于 `2455032`;MSVC 侧编译实证于 `8eabc1b`)。同种子在两边必须打出逐位相同的哈希——确定性是被检查的性质,不是被祈祷的性质。
 - **反射隔离**。两个头只在 .cpp 里 include,绝不进任何 UHT 反射头([M2_UE_README L40–42](m2_ue/M2_UE_README.md)),UE 的 unity build 与 IWYU 不会波及核心。
 - **数值单一来源**。战斗与层进程数值全部来自 [uegame/Content/Data/CombatConfig.csv](uegame/Content/Data/CombatConfig.csv),运行时加载、加载时回显一行、缺表大声报错(`593a88b`),打包构建以 NonUFS 松散文件携带(`4358a35`)。
 - **随机性纪律**。所有随机抽取来自单个显式种子的 `std::mt19937_64`;无时间种子、无全局 rand、无静态可变状态(dungeon.hpp 首注);敌人布点用 `seed ^ 0x9E3779B97F4A7C15` 子流,布局流不受扰动(`048ad06`);层种子链是 splitmix64 纯整数管线,不消耗任何 RNG 流(`8a4929c`)。
@@ -185,7 +185,7 @@ git clone https://github.com/My-Denia/uegame.git
 
 **玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:FloorManager 在世界初始化后自举一局,钉住的默认种子 7(`c7deca2`)。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
 
-**取证控制台**(13 个动词,全部 `!UE_BUILD_SHIPPING`,uegame/Source/uegame/DungeonEvidence.cpp:157–490):
+**取证控制台**(13 个动词,uegame/Source/uegame/DungeonEvidence.cpp:158–494——其中 11 个在 `!UE_BUILD_SHIPPING` 门内;M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar` 在门外,编译进所有配置):
 
 | 动词 | 用途 |
 |---|---|
