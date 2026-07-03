@@ -94,7 +94,12 @@ void ADungeonSpawner::BeginPlay()
 		}
 	}
 
-	if (bSpawnEnemies)
+	// On the bAutoStartRun path the first floor's wave is owned by StartFloor(1) ->
+	// RegenerateFloor one tick later, which despawns every enemy before respawning. Spawning
+	// here too would only be a transient wave destroyed that same tick (double-spawn), so the
+	// auto-start path skips it. Spawners with bAutoStartRun=false (static designer-placed
+	// dungeons) still populate at BeginPlay.
+	if (bSpawnEnemies && !bAutoStartRun)
 	{
 		if (UWorld* World = GetWorld(); World && World->IsGameWorld())
 		{
