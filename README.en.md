@@ -202,7 +202,7 @@ Logs land in `uegame/Saved/Logs/uegame.log`; grep anchors: [RunStarted] [FloorCo
 **Outside the engine (independent re-verification).** No UE needed — any C++17 compiler:
 
 ```
-./build.sh                                            # M1 demo CLI (→ ./dungeon)
+bash build.sh                                         # M1 demo CLI (→ ./dungeon; the script is tracked non-executable, hence bash)
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic m1_verify.cpp -o m1_verify && ./m1_verify 1000
 g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 3
 ```

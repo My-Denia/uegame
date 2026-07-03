@@ -202,7 +202,7 @@ git clone https://github.com/My-Denia/uegame.git
 **引擎之外(独立复验侧)。** 不需要 UE,任何 C++17 编译器:
 
 ```
-./build.sh                                            # M1 演示 CLI(→ ./dungeon)
+bash build.sh                                         # M1 演示 CLI(→ ./dungeon;脚本入库为非执行位,故用 bash 调起)
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic m1_verify.cpp -o m1_verify && ./m1_verify 1000
 g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 3
 ```
