@@ -30,6 +30,11 @@
 namespace
 {
 
+// Every console verb in this file is test/evidence scaffolding - the whole set is compiled
+// out of Shipping (the M2-era Dungeon.Spawn/Dungeon.WalkFar included), so no forensic
+// surface ships. Development/PIE builds keep the gate true, so evidence runs are unaffected.
+#if !UE_BUILD_SHIPPING
+
 ADungeonSpawner* FindSpawner(UWorld* World)
 {
 	for (TActorIterator<ADungeonSpawner> It(World); It; ++It)
@@ -164,9 +169,8 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonWalkFarCmd(
 	TEXT("Nav-path check + walk the player to the farthest room of the spawned dungeon"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonWalkFarCmd));
 
-#if !UE_BUILD_SHIPPING
 // ---------------------------------------------------------------------------
-// M3 forensic verbs - test/evidence only, compiled out of shipping builds.
+// M3 forensic verbs - test/evidence only (whole file gated at the top).
 // ---------------------------------------------------------------------------
 
 void DungeonCombatStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)

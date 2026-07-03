@@ -1,7 +1,7 @@
 // DungeonSpawner.h - M2: renders the engine-agnostic M1 dungeon Layout as walkable geometry.
 //
-// Landed from the m2_ue/ scaffold. NOT yet compile-verified under UE (pending the
-// milestone-A UBT build). Audit advisories applied at landing:
+// Landed from the m2_ue/ scaffold and compile-verified under UE (full UBT rebuilds
+// through M4/v1; exercised in PIE). Audit advisories applied at landing:
 //   #1 "NavigationSystem" added to uegame.Build.cs dependencies
 //   #2 NavMeshBoundsVolume is spawned in BeginPlay (game worlds only), never OnConstruction
 //   #4 ConstructorHelpers::FObjectFinder at constructor scope (no static-in-lambda)
