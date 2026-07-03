@@ -41,6 +41,15 @@ void PlaceSpawnerInLevelCmd(const TArray<FString>& Args, UWorld* /*InWorld*/)
 		UE_LOG(LogTemp, Error, TEXT("[DungeonPlace] GEditor unavailable"));
 		return;
 	}
+	// The MCP bridge passes the PIE world when a session is live, but this tool mutates + SAVES
+	// the editor source map. Running it during PIE would dirty/persist the source level from a
+	// play context (the editor-world pollution pattern Dungeon.Spawn guards against). Refuse.
+	if (GEditor->PlayWorld)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[DungeonPlace] refusing while PIE is active - stop PIE first (this tool saves the editor source map)"));
+		return;
+	}
 	UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (!World)
 	{

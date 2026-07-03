@@ -124,7 +124,7 @@ FloorManager (a GameInstance subsystem) owns {runSeed, floorIndex}; floor transi
 
 The transferable part of this project is exactly six disciplines:
 
-**Predict first, then run the engine.** Anything that shapes generation ships with a pre-registered prediction. The engine-agnostic core builds standalone under g++ and prints the reference values — per-floor seeds, layout hashes, enemy-plan hashes — which go into the commit message *before* the editor ever runs (`8a4929c`). Unreal then has to reproduce them byte-for-byte from a different compiler in a different process: first in a spike (`5824e68`), then across the full descend chain with zero console input after the review-fix round (`c7deca2`). A prediction that fails stops the milestone. The hash values themselves are deliberately not restated in this file — the repo's rule is that the reproduce command is the source of truth (`m2test floors 7 3`, see §7), and immutable commit messages hold the recorded values, so this document points rather than copies.
+**Predict first, then run the engine.** Anything that shapes generation ships with a pre-registered prediction. The engine-agnostic core builds standalone under g++ and prints the reference values — per-floor seeds, layout hashes, enemy-plan hashes — which go into the commit message *before* the editor ever runs (`8a4929c`). Unreal then has to reproduce them byte-for-byte from a different compiler in a different process: first in a spike (`5824e68`), then across the full descend chain with zero console input after the review-fix round (`c7deca2`). A prediction that fails stops the milestone. The hash values themselves are deliberately not restated in this file — the repo's rule is that the reproduce command is the source of truth (`m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv`, see §7), and immutable commit messages hold the recorded values, so this document points rather than copies.
 
 **Pinned hashes as regression armor.** The seed-7 layout and enemy hashes are re-asserted after every risky change: after deleting the template variants (`9ffaa26`), after the TileSize default flip (`8faf20a`), after review fixes (`1463b30`), on the M4 base (PR #3). If the pins hold, the refactor was harmless.
 
@@ -205,10 +205,10 @@ Logs land in `uegame/Saved/Logs/uegame.log`; grep anchors: `[RunStarted]` `[Floo
 ```
 bash build.sh                                         # M1 demo CLI (→ ./dungeon; the script is tracked non-executable, hence bash)
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic m1_verify.cpp -o m1_verify && ./m1_verify 1000
-g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 3
+g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv
 ```
 
-**Determinism self-check, two commands.** `m2test floors 7 3` above prints the per-floor seeds and hashes; in PIE, run `Dungeon.StartRun 7`, descend floor by floor, and grep the log for planHash / enemyPlan — both sides must match bit-for-bit. This is exactly the path the M4 acceptance ran (`8a4929c` → `c7deca2`).
+**Determinism self-check, two commands.** `m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv` above prints the per-floor seeds and hashes; in PIE, run `Dungeon.StartRun 7`, descend floor by floor, and grep the log for planHash / enemyPlan — both sides must match bit-for-bit. This is exactly the path the M4 acceptance ran (`8a4929c` → `c7deca2`).
 
 ---
 

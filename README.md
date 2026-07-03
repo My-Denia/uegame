@@ -124,7 +124,7 @@ FloorManager(GameInstance 子系统)持有 {runSeed, floorIndex};层切换走单
 
 这套流程里可迁移的部分,恰好是六条纪律:
 
-**先预测,再开引擎。** 一切影响生成的改动都带预注册预测:引擎无关核心用 g++ 独立构建,打印参考值——层种子、布局哈希、敌人哈希——在编辑器运行之前写进提交正文(`8a4929c`)。UE 侧必须用另一个编译器、另一个进程逐位复现:先是 spike(`5824e68`),然后是评审修复轮后的全链零输入复现(`c7deca2`)。预测失败,里程碑停摆。哈希值本身刻意不在本文重印——仓库的规矩是复现命令才是真源(`m2test floors 7 3`,见 §7),值录在不可变的提交正文里,本文只指路、不复制。
+**先预测,再开引擎。** 一切影响生成的改动都带预注册预测:引擎无关核心用 g++ 独立构建,打印参考值——层种子、布局哈希、敌人哈希——在编辑器运行之前写进提交正文(`8a4929c`)。UE 侧必须用另一个编译器、另一个进程逐位复现:先是 spike(`5824e68`),然后是评审修复轮后的全链零输入复现(`c7deca2`)。预测失败,里程碑停摆。哈希值本身刻意不在本文重印——仓库的规矩是复现命令才是真源(`m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv`,见 §7),值录在不可变的提交正文里,本文只指路、不复制。
 
 **钉住的哈希当回归甲。** seed-7 的布局哈希与敌人哈希在每次高风险改动后重新断言:删模板变体后(`9ffaa26`)、TileSize 默认值切换后(`8faf20a`)、评审修复后(`1463b30`)、M4 基座上(PR #3)。哈希不变,重构才算无害。
 
@@ -205,10 +205,10 @@ git clone https://github.com/My-Denia/uegame.git
 ```
 bash build.sh                                         # M1 演示 CLI(→ ./dungeon;脚本入库为非执行位,故用 bash 调起)
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic m1_verify.cpp -o m1_verify && ./m1_verify 1000
-g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 3
+g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv
 ```
 
-**确定性自查配方(两条命令级)。** 上面 `m2test floors 7 3` 打印三层的种子与哈希;PIE 里 `Dungeon.StartRun 7` 后逐层下楼,grep 日志里的 planHash / enemyPlan——两侧必须逐位相同。这正是 M4 验收跑过的路径(`8a4929c` → `c7deca2`)。
+**确定性自查配方(两条命令级)。** 上面 `m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv` 打印三层的种子与哈希;PIE 里 `Dungeon.StartRun 7` 后逐层下楼,grep 日志里的 planHash / enemyPlan——两侧必须逐位相同。这正是 M4 验收跑过的路径(`8a4929c` → `c7deca2`)。
 
 ---
 

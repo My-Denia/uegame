@@ -78,6 +78,13 @@ void DungeonSpawnCmd(const TArray<FString>& Args, UWorld* World)
 		return;
 	}
 	Spawner->Seed = Seed;
+	// Run 2: the first-run seed resolver now owns the run seed (entropy by default), and the
+	// spawner's default bAutoStartRun=true would route the auto-start through it - resolving a
+	// RANDOM seed one tick later and regenerating over the requested one. Dungeon.Spawn is a
+	// standalone single-floor forensic spawn (the documented "单层生成"), not a run entry: force
+	// bAutoStartRun=false so the requested Seed is preserved (enemies still spawn via the
+	// bSpawnEnemies && !bAutoStartRun path; no run => no stairs).
+	Spawner->bAutoStartRun = false;
 	// Optional tile size (cm). 1-cell corridors at 100cm erode to ~30cm under the default
 	// nav agent radius (35) and get culled from the navmesh; 200cm keeps them navigable.
 	if (Args.Num() > 1)
