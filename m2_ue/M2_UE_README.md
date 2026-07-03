@@ -15,7 +15,7 @@
 
 1. 运行时 spawn 的 `NavMeshBoundsVolume` 没有 brush 几何 → bounds 为空且**在 SpawnActor 内部就以空 bounds 注册**。修法(已在代码里):`SpawnActorDeferred` + 在 `FinishSpawning` 前挂好地图尺寸的 `UBoxComponent`(nav 系统读 `GetComponentsBoundingBox(true)`,NavigationSystem.cpp:4145)。
 2. 地牢几何注册早于 nav 体积 → 界外 dirty area 被丢弃。修法(已在代码里):体积注册后 `AddDirtyArea(全图, ENavigationDirtyFlag::All)` 强制重铺。
-3. **tileSize=100 的 1 格走廊会被 navmesh 剔除**:`AgentRadius=35` 两侧侵蚀后仅剩 ~30cm,Recast 丢弃 → 每房成孤岛(路径 partial)。**建议 tileSize ≥ 200**(`Dungeon.Spawn <seed> 200` 或在 spawner 上设 `TileSize=200`)。玩家物理碰撞在 100 下其实能过(胶囊 68cm<100cm),被卡的只是 navmesh;后续里程碑若定 100 需调 agent radius 或加宽走廊。
+3. **tileSize=100 的 1 格走廊会被 navmesh 剔除**:`AgentRadius=35` 两侧侵蚀后仅剩 ~30cm,Recast 丢弃 → 每房成孤岛(路径 partial)。**建议 tileSize ≥ 200**(`Dungeon.Spawn <seed> 200` 或在 spawner 上设 `TileSize=200`;M3 Phase-0 起 200 已是 spawner 默认值,见提交 8faf20a)。玩家物理碰撞在 100 下其实能过(玩家胶囊直径 84cm<100cm,半径 42 见 uegameCharacter.cpp:24),被卡的只是 navmesh;后续里程碑若定 100 需调 agent radius 或加宽走廊。
 
 ### 复现命令(编辑器开着、MCP server 监听 8000 时)
 
@@ -47,7 +47,7 @@ Spawner 已从本目录的脚手架**落地**到 UE 模块源码里;本目录现
 ## 剩余里程碑
 
 - ✅ **A 编译**(验收 #1,2026-07-02 已过):`"C:\Program Files (x86)\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" uegameEditor Win64 Development -Project="C:\Files\uegame\uegame\uegame.uproject" -WaitMutex` → `Result: Succeeded`,MSVC 14.44.35228 + Win SDK 10.0.26100,`[1/4] Compile Module.uegame.cpp`(unity 聚合含 `DungeonSpawner.cpp`)零警告零错误。注意 Live Coding 活跃时 UBT 会拒绝构建——先关编辑器。
-- **B PIE 取证**(验收 #2/#3/#4):编辑器把 `ADungeonSpawner` 拖进关卡设 `Seed` → PIE。
+- ✅ **B PIE 取证**(验收 #2/#3/#4,2026-07-02 已过,四条验收证据见顶部"M2 完成"节):编辑器把 `ADungeonSpawner` 拖进关卡设 `Seed` → PIE。
   - 保真:`LogTemp` 里 `[Dungeon] seed=.. rooms=.. spawned N instances (walkable == plan-passable) .. fully-connected=YES planHash=0x..` + 关卡截图。
   - 可走:角色从起点房走到远房,沿途截图;撞墙不穿模、地面有 navmesh(`P` 键可视化)。
   - 确定性:同 `Seed` 两次 PIE,比对日志 `planHash` 一致。
@@ -68,7 +68,7 @@ Spawner 已从本目录的脚手架**落地**到 UE 模块源码里;本目录现
 ## 运行时导航(手放兜底方案)
 
 若 PIE 日志显示运行时体积 `bounds valid=NO`(或 navmesh 没铺开):在关卡里手放一个
-`NavMeshBoundsVolume`,盖住 `(0,0)`–`(6400,4000)`(默认 64×40 格 × 100cm/格),
+`NavMeshBoundsVolume`,盖住 `(0,0)`–`(12800,8000)`(64×40 格 × 当前默认 TileSize=200;若手动设 100 则为 `(6400,4000)`),
 Brush 尺寸调大即可;`RuntimeGeneration=Dynamic` 已在 ini 里,无需再设。
 然后把 spawner 的 `bSpawnNavBounds` 设为 `false`。
 
