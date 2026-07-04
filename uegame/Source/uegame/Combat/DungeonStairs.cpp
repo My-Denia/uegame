@@ -40,6 +40,7 @@ void ADungeonStairs::BeginPlay()
 {
 	Super::BeginPlay();
 	Trigger->OnComponentBeginOverlap.AddDynamic(this, &ADungeonStairs::OnTriggerBegin);
+	Trigger->OnComponentEndOverlap.AddDynamic(this, &ADungeonStairs::OnTriggerEnd);
 }
 
 void ADungeonStairs::OnTriggerBegin(UPrimitiveComponent* /*OverlappedComponent*/, AActor* OtherActor,
@@ -52,9 +53,38 @@ void ADungeonStairs::OnTriggerBegin(UPrimitiveComponent* /*OverlappedComponent*/
 	{
 		return;   // only the player descends
 	}
+	bPawnInside = true;
 	UE_LOG(LogTemp, Display, TEXT("[Stairs] player stepped on the stairs"));
-	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	RequestDescendNow();
+}
+
+void ADungeonStairs::OnTriggerEnd(UPrimitiveComponent* /*OverlappedComponent*/, AActor* OtherActor,
+	UPrimitiveComponent* /*OtherComp*/, int32 /*OtherBodyIndex*/)
+{
+	UWorld* World = GetWorld();
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	if (PC && OtherActor == PC->GetPawn())
 	{
-		FM->RequestDescend(/*bForce=*/false);
+		bPawnInside = false;
+	}
+}
+
+void ADungeonStairs::OnFloorCleared()
+{
+	if (!bPawnInside)
+	{
+		return;   // player not on the pad; the normal overlap handles it when they arrive
+	}
+	// require-floor-clear: the overlap already fired and was gated; the gate is now open, so
+	// descend without making the player step off and back on.
+	UE_LOG(LogTemp, Display, TEXT("[Stairs] floor cleared while player on pad - retrying descend"));
+	RequestDescendNow();
+}
+
+void ADungeonStairs::RequestDescendNow()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->RequestDescend(/*bForce=*/false);   // gate policy enforced in the FloorManager
 	}
 }

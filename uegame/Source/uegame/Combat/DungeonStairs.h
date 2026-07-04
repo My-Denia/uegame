@@ -23,11 +23,27 @@ public:
 
 	virtual void BeginPlay() override;
 
+	/** Re-attempt the descend now that the floor's clear gate may have opened. Called by the
+	 *  spawner when the last enemy dies: the overlap is edge-triggered, so a player standing on
+	 *  the pad when the final enemy falls would otherwise stay stuck until stepping off and back
+	 *  on. No-op unless the player pawn is currently inside the trigger. */
+	void OnFloorCleared();
+
 private:
 	UFUNCTION()
 	void OnTriggerBegin(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
 		const FHitResult& SweepResult);
+
+	UFUNCTION()
+	void OnTriggerEnd(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
+
+	/** Ask the FloorManager to descend (gate enforced there). Shared by overlap + clear paths. */
+	void RequestDescendNow();
+
+	/** True while the player pawn is inside the trigger (Begin/End overlap). */
+	bool bPawnInside = false;
 
 	UPROPERTY(VisibleAnywhere, Category="Stairs")
 	TObjectPtr<UBoxComponent> Trigger;
