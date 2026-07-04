@@ -309,7 +309,7 @@ int main() {
                invariant ? "seed-7 anchor value drift" : "M5 draws perturbed M1/M3/M4 streams");
     }
 
-    // -- #14 validate_pool_gate: one accept + seven distinct rejections -----------------
+    // -- #14 validate_pool_gate: one accept + eight distinct rejections ------------------
     {
         using K = m5::AffixKind;
         bool ok = true;
@@ -322,6 +322,7 @@ int main() {
         expectOk(demoPool(), true, "valid pool rejected");                                   // accept
         expectOk({}, false, "empty pool accepted");                                          // empty
         expectOk({ {1, K::DamagePct, 10, 5, 0}, {1, K::MaxHpFlat, 10, 5, 0} }, false, "dup id accepted");   // dup id
+        expectOk({ {1, static_cast<K>(4), 10, 5, 0} }, false, "unknown kind accepted");       // out-of-range enum
         expectOk({ {1, K::DamagePct, 10, -1, 0} }, false, "negative weight accepted");        // weight < 0
         expectOk({ {1, K::DamagePct, 10, 0, 0}, {2, K::MaxHpFlat, 10, 0, 0} }, false, "all-zero weight accepted"); // no positive weight
         expectOk({ {1, K::DamagePct, m5::kMaxAbsMagnitude + 1, 5, 0} }, false, "magnitude overflow accepted");     // magnitude range

@@ -167,7 +167,10 @@ The affix pool source (DataTable or CSV) follows the exact policy `CombatConfig:
 
 Additionally, whatever pool is loaded must pass `m5::validate_affix_pool()` before first use; a pool
 that fails validation is treated the same as a missing table (Fatal in Shipping/Test, warn+fallback
-in Editor). Like `CombatConfig`, the loader should be process-level **LoadOnce** cached — meaning an
+in Editor). Validation rejects id collisions, non-positive-weight-only pools, out-of-range
+magnitudes/max_stacks, and **unknown affix kinds** — e.g. a stale numeric enum from an out-of-sync
+table producing `static_cast<AffixKind>(4)` — so malformed rows can never reach `generate_offer()` /
+`resolve()` (where an unknown kind would otherwise silently no-op). Like `CombatConfig`, the loader should be process-level **LoadOnce** cached — meaning an
 affix-table edit requires an editor restart to take effect, consistent with the existing CSV
 discipline.
 

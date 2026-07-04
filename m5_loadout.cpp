@@ -42,6 +42,22 @@ inline std::int64_t clamp_i64(std::int64_t v, std::int64_t lo, std::int64_t hi) 
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// True only for the four defined AffixKind values. A malformed table (e.g. a CSV/DataTable
+// parser producing static_cast<AffixKind>(4)) yields an out-of-range enum whose stat rule
+// resolve() would silently no-op; validate_affix_pool() rejects it here so it never reaches
+// generate_offer()/resolve(). The all-enumerator switch means -Wswitch flags any kind added
+// to the enum that isn't handled here.
+inline bool is_known_kind(AffixKind k) {
+    switch (k) {
+        case AffixKind::DamagePct:
+        case AffixKind::AttackIntervalPct:
+        case AffixKind::MaxHpFlat:
+        case AffixKind::MoveSpeedPct:
+            return true;
+    }
+    return false;
+}
+
 // Accumulate `add` into a per-kind running total kept inside [-kTotalCap, kTotalCap].
 // Each contribution is clamped first, so `total + add` can never overflow int64
 // (|total|,|add| <= kTotalCap => |sum| <= 2*kTotalCap, far below INT64_MAX) for ANY
@@ -90,6 +106,9 @@ ValidationResult validate_affix_pool(const std::vector<Affix>& pool) {
     for (const Affix& a : pool) {
         if (!ids.insert(a.id).second) {
             r.ok = false; r.reason = "duplicate id " + std::to_string(a.id); return r;
+        }
+        if (!is_known_kind(a.kind)) {
+            r.ok = false; r.reason = "unknown affix kind on id " + std::to_string(a.id); return r;
         }
         if (a.weight < 0) {
             r.ok = false; r.reason = "negative weight on id " + std::to_string(a.id); return r;
