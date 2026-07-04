@@ -1,0 +1,32 @@
+name: Core CTest
+
+# Engine-agnostic determinism gates only: builds the g++ targets (dungeon / m1verify /
+# m2test) via CMake and runs the 4 CTest reachability/determinism gates. This is the PR gate
+# that stops a generation-pipeline regression from merging. The UE/MSVC editor build is NOT
+# run here -- that stays on the local/self-hosted path (no engine in CI).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  core-ctest:
+    name: Engine-agnostic determinism gates (g++)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure (CMake, Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (dungeon / m1verify / m2test)
+        run: cmake --build build --parallel
+
+      - name: Run determinism gates (ctest)
+        run: ctest --test-dir build --output-on-failure

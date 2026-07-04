@@ -6,9 +6,49 @@
 
 It is also an experiment in how to build one. The whole M1→M4 arc was implemented by AI coding agents under evidence gates: predictions pre-registered before the engine runs, cross-compiler hash checks, forensic in-engine probes, independent audits, adversarial cross-tool review. This README is the account of both the game and the process. Every number in it traces to a commit, a PR thread, or a file in this repo — and where something was human-driven, unreachable, or unverified, it says so.
 
-Status: v1 loop complete (M1+M2+M3+M4); PR #3 merged into `main` on 2026-07-02 (merge commit `94e679d`).
+Status: the v1 frozen baseline is a complete loop (M1+M2+M3+M4); PR #3 merged on 2026-07-02 (merge commit `94e679d`). `main` has since advanced through Run 2 (PR #7) and Run 2.5 (PR #10) to `cbd0bff`, adding an enemy perception model, combat feedback, and clear-to-descend stairs.
+
+This README is in two parts: **Run 2.x — current gameplay state** (below) reflects the version you actually play; **§1–§8 are the v1/M4 frozen facts**, preserved verbatim as historical evidence, every number still tracing to its original commit / PR / log anchor.
 
 ---
+
+## Run 2.x — current gameplay state
+
+`main` = `cbd0bff`. Run 2 ([PR #7](https://github.com/My-Denia/uegame/pull/7), `playability`) brought a random-but-reproducible first-run seed, the placed shipping spawner, and provisional balance; Run 2.5 ([PR #10](https://github.com/My-Denia/uegame/pull/10), `combat-feel`, commits `b932e21` + `7efdff0`) added the perception model, combat feedback, and clear-to-descend. The engine-agnostic generation core (dungeon.hpp / m2_adapter.hpp) has been byte-frozen since v1 — the seed-7 layout-hash anchors (ts100 `planHash`, ts200 `planHash`, tile-invariant `enemyPlan`) do not move; enemy counts and per-floor scaling now follow the current CSV below.
+
+**Current values (single source [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv); editing the CSV needs an editor restart — the loader is a process-level load-once cache):**
+
+| Field | Current value |
+|---|---|
+| EnemyMaxHP | 30 |
+| EnemyMoveSpeed | 240 |
+| EnemyContactDamage | 7 |
+| EnemyDamageInterval | 1.5s |
+| AggroRange / LeashRange | 900 / 1400 |
+| PlayerMaxHP | 140 |
+| PlayerAttackDamage / Range / Cooldown | 15 / 250 / 0.6s |
+| EnemiesPerRoom | 2 |
+| PerFloorScaling | 0.5 |
+| bRequireFloorClearToDescend | true |
+| MaxFloors | 3 |
+
+Changes from the v1/M4 archived balance (archived values in the §1 scoreboard / §3, anchors `ad57d7e` / `1ec27c4`): contact damage 10 per 1.00s → 7 per 1.5s; player HP 100 → 140; per-floor scaling 1.0 → 0.5 (floor 3 drops from 6 enemies/room at effHP 90 to 4/room at effHP 60 — enemy totals 16/24/36 rather than the archived 16/32/54); descend gate descend-anytime (false) → clear-to-descend (true). AggroRange/LeashRange are new in Run 2.5. Reproduce the current per-floor set with `m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv` (layout planHash stays bit-identical to the archive; enemyHash moves with the scaling).
+
+**Enemy perception model (Run 2.5).** An enemy acquires the player only within AggroRange (900) **and with line-of-sight** — the LOS test is a horizontal `ECC_WorldStatic` trace at capsule-center height, so only tall walls occlude (thin floor/corridor/door slabs are cleared by the same-Z ray). Once chasing, it de-aggros only past LeashRange (1400) (LeashRange > AggroRange = hysteresis; LOS is not re-checked while chasing, so rounding a corner never flickers aggro). An un-acquired enemy stands in place — no wander, no through-wall acquisition, no contact damage (uegame/Source/uegame/Combat/DungeonEnemy.cpp `PursueTick` / `ComputeLOSTo`; grep anchor `[Aggro]`).
+
+**Clear-to-descend (Run 2.5).** `bRequireFloorClearToDescend=true`: the stairs refuse to descend until every enemy room on the floor is cleared (descend-anytime was the v1 default). Edge-trigger fix: clearing the last room while standing on the pad re-pokes the stairs to descend in place (`7efdff0`).
+
+**Three combat-feedback elements (Run 2.5), all grep-testable by log anchor:** (1) an enemy white hit-flash on taking damage (~0.12s, via `OnDamaged`, `[Feedback] hitFlash`); (2) an attack-arc cone drawn on every swing, hit or miss (`ENABLE_DRAW_DEBUG`-gated, `[Feedback] attackArc`); (3) a red screen pulse when the player takes contact damage (camera fade 0.5→0 over 0.25s, `[Feedback] playerPulse`).
+
+**Forensic verbs are now 16.** Run 2.5 added the 16th, `Dungeon.AggroStatus`; the verb table in §7 below lists the v1/M4 set of 15.
+
+**CI (Run 3).** The 4 engine-agnostic g++ determinism gates (`m1verify 1000`, `m2test validate 200`, `enemyDeterminism 500`, `floorsDeterminism 200`, defined in [CMakeLists.txt](CMakeLists.txt)) now run on every pull request and push to main via [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) — previously these gates were only runnable locally.
+
+---
+
+## v1 / M4 — frozen facts (preserved verbatim below as historical evidence)
+
+> Everything from here down is the v1/M4 evidence record, kept verbatim and unaltered: each number traces to its original anchor (commit / PR / log). For current gameplay values see **Run 2.x — current gameplay state** above; the old balance figures (contact 10 per 1.00s, player HP 100→0, 6 enemies/room, etc.) are v1/M4-era archived evidence, not current values.
 
 ## 1. The five-minute version
 

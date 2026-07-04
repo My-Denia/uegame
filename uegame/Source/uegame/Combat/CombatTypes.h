@@ -1,6 +1,6 @@
 // CombatTypes.h - M3 data-driven combat config (single DataTable row).
 // All combat numbers live in Content/Data/CombatConfig.csv; nothing is hard-coded
-// in gameplay logic. PerFloorScaling is RESERVED for M4 (defined, not used).
+// in gameplay logic. PerFloorScaling drives the M4 per-floor difficulty scaling.
 
 #pragma once
 
@@ -63,9 +63,9 @@ struct FCombatConfigRow : public FTableRowBase
 
 	// --- M4 run loop ---
 
-	/** Descend gate policy: false = descend-anytime (v1 default: pacing and player agency;
-	 *  clearing rooms stays an optional challenge, not a hard gate), true = stairs refuse
-	 *  until every enemy room on the floor is cleared. */
+	/** Descend gate policy: false = descend-anytime (pacing and player agency; clearing rooms
+	 *  stays an optional challenge, not a hard gate), true = stairs refuse until every enemy
+	 *  room on the floor is cleared. Current CSV ships true (Run 2.5 stairs-cleared gate). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run")
 	bool bRequireFloorClearToDescend = false;
 
