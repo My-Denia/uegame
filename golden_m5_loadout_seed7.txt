@@ -1,0 +1,32 @@
+# M5 loadout golden vector (engine-agnostic core, deterministic, integer-only)
+# run_seed=7
+# base fixture (TEST-ONLY, not production truth): damage=15 attack_ms=600 max_hp=140 move_speed=500
+# choice policy: take offer[0] (first drawn) each floor; cumulative loadout
+floor 1
+  offer:
+    id=10 kind=DamagePct mag=15 weight=100 max_stacks=0
+    id=14 kind=MaxHpFlat mag=30 weight=100 max_stacks=0
+    id=12 kind=AttackIntervalPct mag=-20 weight=80 max_stacks=0
+  choose: id=10 kind=DamagePct mag=15
+  resolved: damage=17 attack_ms=600 max_hp=140 move_speed=500
+floor 2
+  offer:
+    id=16 kind=MoveSpeedPct mag=10 weight=70 max_stacks=0
+    id=15 kind=MaxHpFlat mag=60 weight=50 max_stacks=2
+    id=14 kind=MaxHpFlat mag=30 weight=100 max_stacks=0
+  choose: id=16 kind=MoveSpeedPct mag=10
+  resolved: damage=17 attack_ms=600 max_hp=140 move_speed=550
+floor 3
+  offer:
+    id=14 kind=MaxHpFlat mag=30 weight=100 max_stacks=0
+    id=13 kind=AttackIntervalPct mag=-40 weight=40 max_stacks=2
+    id=17 kind=MoveSpeedPct mag=20 weight=30 max_stacks=2
+  choose: id=14 kind=MaxHpFlat mag=30
+  resolved: damage=17 attack_ms=600 max_hp=170 move_speed=550
+resolve-demo (resolve(base, explicit picks) -- every rule + clamp)
+  base: damage=15 attack_ms=600 max_hp=140 move_speed=500
+  DamagePct+15: damage=17 attack_ms=600 max_hp=140 move_speed=500
+  DamagePct+15,AtkInterval-25: damage=17 attack_ms=450 max_hp=140 move_speed=500
+  DamagePct+30(x2),AtkInt-25: damage=19 attack_ms=450 max_hp=140 move_speed=500
+  MaxHpFlat+30,MoveSpeedPct+10: damage=15 attack_ms=600 max_hp=170 move_speed=550
+  clamp:AttackIntervalPct-40x50: damage=15 attack_ms=150 max_hp=140 move_speed=500
