@@ -235,6 +235,14 @@ void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
 		{
 			if (UWorld* World = GetWorld())
 			{
+				// M5: offer the floor-clear reward BEFORE re-poking the stairs. NotifyFloorCleared() sets
+				// RewardPending (unless this is the final floor), so the re-poke below is intentionally
+				// blocked by the reward gate until the player picks - the reward can't be skipped by the
+				// auto-descend for a player already standing on the pad.
+				if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+				{
+					FM->NotifyFloorCleared();
+				}
 				for (TActorIterator<ADungeonStairs> It(World); It; ++It)
 				{
 					It->OnFloorCleared();

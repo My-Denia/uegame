@@ -40,7 +40,7 @@ Changes from the v1/M4 archived balance (archived values in the §1 scoreboard /
 
 **Three combat-feedback elements (Run 2.5), all grep-testable by log anchor:** (1) an enemy white hit-flash on taking damage (~0.12s, via `OnDamaged`, `[Feedback] hitFlash`); (2) an attack-arc cone drawn on every swing, hit or miss (`ENABLE_DRAW_DEBUG`-gated, `[Feedback] attackArc`); (3) a red screen pulse when the player takes contact damage (camera fade 0.5→0 over 0.25s, `[Feedback] playerPulse`).
 
-**Forensic verbs are now 16.** Run 2.5 added the 16th, `Dungeon.AggroStatus`; the verb table in §7 below lists the v1/M4 set of 15.
+**Forensic verbs are now 18.** Run 2.5 added the 16th, `Dungeon.AggroStatus`; PR #12B (M5 loadout) added the 17th and 18th, `Dungeon.LoadoutStatus` and `Dungeon.ChooseLoadout` (both shipping-gated, inside `!UE_BUILD_SHIPPING`). The verb table in §7 below still lists the v1/M4 set of 15 (frozen history).
 
 **CI (Run 3).** The 4 engine-agnostic g++ determinism gates (`m1verify 1000`, `m2test validate 200`, `enemyDeterminism 500`, `floorsDeterminism 200`, defined in [CMakeLists.txt](CMakeLists.txt)) now run on every pull request and push to main via [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) — previously these gates were only runnable locally.
 

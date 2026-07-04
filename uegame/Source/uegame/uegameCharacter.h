@@ -12,6 +12,7 @@ class UCameraComponent;
 class UInputAction;
 class UHealthComponent;
 class UCombatComponent;
+class ULoadoutComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -61,6 +62,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	UCombatComponent* Combat;
 
+	/** M5 build-diversity: the run's affix picks + resolved stats (reward earned on floor clear). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	ULoadoutComponent* Loadout;
+
 public:
 
 	/** Constructor */
@@ -101,6 +106,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	virtual void DoAttack();
 
+	/** M5: apply the player's loadout reward pick (0..2). Routed through the FloorManager so the choice
+	 *  and the stairs re-poke live in one place; also driven by Dungeon.ChooseLoadout and keys 1/2/3. */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	virtual void DoChooseLoadout(int32 Index);
+
 protected:
 
 	/** Init HP from the combat DataTable row; bind death handling. */
@@ -117,6 +127,13 @@ protected:
 private:
 
 	FTimerHandle RestartTimerHandle;
+
+	// Legacy key forwarders (1/2/3) for the loadout offer - thin wrappers so UInputComponent::BindKey
+	// (which binds a parameterless handler) can drive DoChooseLoadout(index). Console verb
+	// Dungeon.ChooseLoadout is the mandated forensic interface; these are the playable convenience.
+	void ChooseLoadoutKey0() { DoChooseLoadout(0); }
+	void ChooseLoadoutKey1() { DoChooseLoadout(1); }
+	void ChooseLoadoutKey2() { DoChooseLoadout(2); }
 
 public:
 

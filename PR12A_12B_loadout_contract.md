@@ -78,11 +78,13 @@ the player picks one; the pick is appended to `ChosenAffixIds` and `CurrentStats
 
 ### 3. `RewardPending` / `LoadoutChoicePending` vs the auto-descend conflict
 
-**This is the load-bearing integration hazard.** Today the stairs are `descend-anytime`
-(`bRequireFloorClearToDescend = false`, `CombatTypes.h:70`), and the clear path
-(`NotifyEnemyDead` → `AreAllRoomsCleared` → `OnFloorCleared`) makes the stairs live the instant the
-last enemy dies. A player standing on the pad descends **immediately** — which would skip the
-reward offer entirely.
+**This is the load-bearing integration hazard.** The live CSV ships
+`bRequireFloorClearToDescend = true` (the `CombatTypes.h:70` struct default is `false`, but the
+DataTable value wins), so the floor must be cleared before the stairs will descend. The hazard is
+therefore **not** a pre-clear descend — it is the **post-clear re-poke** path: the instant the last
+enemy dies, `NotifyEnemyDead` → `AreAllRoomsCleared()` → `OnFloorCleared()` re-pokes the stairs, and a
+player already standing on the pad descends **immediately** as the floor clears — skipping the reward
+offer entirely — unless a `RewardPending` gate blocks that re-poke.
 
 #12B must introduce a pending-choice gate:
 
@@ -154,6 +156,12 @@ pattern. It prints the current loadout: `ChosenAffixIds`, per-kind totals, and t
 This raises the forensic-verb count from **16** to **17**. The README currently states "取证动词现
 为 16 个" — #12B must update that line and the verb table to **17** in the same PR that adds the verb
 (keep the pinned-count invariant and its doc statement in sync).
+
+> **As implemented (#12B):** the binding adds a **second** shipping-gated verb, `Dungeon.ChooseLoadout
+> <0|1|2>`, as the headless/deterministic pick interface required for no-UI PIE forensics. So the live
+> count goes **16 → 18** (not 17), updated at the LIVE lines only — `README.md:43` and `README.en.md:43`.
+> The frozen v1/M4 "§2 tree" and "§7 table" lines legitimately keep **15** (those sections are preserved
+> verbatim as historical evidence; v1/M4 genuinely had 15 verbs).
 
 ### 8. Affix DataTable / CSV missing policy — mirror `CombatConfig`
 
