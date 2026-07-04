@@ -78,11 +78,13 @@ the player picks one; the pick is appended to `ChosenAffixIds` and `CurrentStats
 
 ### 3. `RewardPending` / `LoadoutChoicePending` vs the auto-descend conflict
 
-**This is the load-bearing integration hazard.** Today the stairs are `descend-anytime`
-(`bRequireFloorClearToDescend = false`, `CombatTypes.h:70`), and the clear path
-(`NotifyEnemyDead` → `AreAllRoomsCleared` → `OnFloorCleared`) makes the stairs live the instant the
-last enemy dies. A player standing on the pad descends **immediately** — which would skip the
-reward offer entirely.
+**This is the load-bearing integration hazard.** The live CSV ships
+`bRequireFloorClearToDescend = true` (the `CombatTypes.h:70` struct default is `false`, but the
+DataTable value wins), so the floor must be cleared before the stairs will descend. The hazard is
+therefore **not** a pre-clear descend — it is the **post-clear re-poke** path: the instant the last
+enemy dies, `NotifyEnemyDead` → `AreAllRoomsCleared()` → `OnFloorCleared()` re-pokes the stairs, and a
+player already standing on the pad descends **immediately** as the floor clears — skipping the reward
+offer entirely — unless a `RewardPending` gate blocks that re-poke.
 
 #12B must introduce a pending-choice gate:
 
