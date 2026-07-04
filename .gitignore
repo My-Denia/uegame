@@ -14,3 +14,6 @@ cmake-build*/
 *.out
 # Harness artifacts (agent-created, not project source)
 /goal-runs/
+# Agent workspace rules — local-only operational discipline, maintained per-machine, not shared source
+/CLAUDE.md
+/AGENTS.md

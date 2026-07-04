@@ -220,7 +220,6 @@ m2_adapter.hpp          engine-agnostic adapter (hashes, placements, seed chain 
 m1_verify.cpp           independent verifier (public API only; user-supplied)
 m2_adapter_test.cpp     adapter CLI (report/validate/determinism/enemies/floors)
 main.cpp + build.sh     M1 demo CLI
-CLAUDE.md + AGENTS.md   workspace agent rules (semantically aligned; Claude reads CLAUDE, Codex reads AGENTS)
 m2_ue/M2_UE_README.md   M2 engine-integration deep dive (zh-CN: runtime-navmesh forensics, repro commands)
 m2_ue/evidence/         6 evidence screenshots (provenance audited via MD5+timestamps, 6a9858f)
 uegame/                 UE 5.8 project (Source/uegame runtime module, Source/uegameEditor MCP module,
