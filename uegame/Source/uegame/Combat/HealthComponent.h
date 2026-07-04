@@ -42,6 +42,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	void Revive(float NewHP = -1.0f);
 
+	/** Forensic-only (Dungeon.SetHP <v> [holdSec]): while set, TakeDamage is a no-op, so a
+	 *  survival probe cannot be interrupted by a lethal hit - no HP drop, no OnDeath, no queued
+	 *  run-fail. Never set in normal gameplay (default false). */
+	void SetInvincible(bool bInInvincible) { bInvincible = bInInvincible; }
+	bool IsInvincible() const { return bInvincible; }
+
 	UPROPERTY(BlueprintAssignable, Category="Combat")
 	FHealthDeathSignature OnDeath;
 
@@ -53,4 +59,7 @@ private:
 	float CurrentHP = 100.0f;
 
 	bool bDead = false;
+
+	/** Forensic invincibility (see SetInvincible). */
+	bool bInvincible = false;
 };

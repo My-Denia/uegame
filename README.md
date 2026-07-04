@@ -50,7 +50,7 @@ m2_adapter.hpp         M2/M3/M4 引擎无关适配:格→世界坐标、连通�
 uegame/Source/uegame   UE 胶水:DungeonSpawner(ISM 几何/碰撞/运行时 navmesh)、
    │                     FloorManager(GameInstance 子系统:局/层状态机)、Combat/、DungeonStairs
 uegameEditor           MCP 工具集(ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 个 Dungeon.* 取证动词(全部 shipping-gated,在 !UE_BUILD_SHIPPING 门内)
+                         + 15 个 Dungeon.* 取证动词(全部 shipping-gated,在 !UE_BUILD_SHIPPING 门内)
 ```
 
 为什么这么切:
@@ -124,7 +124,7 @@ FloorManager(GameInstance 子系统)持有 {runSeed, floorIndex};层切换走单
 
 这套流程里可迁移的部分,恰好是六条纪律:
 
-**先预测,再开引擎。** 一切影响生成的改动都带预注册预测:引擎无关核心用 g++ 独立构建,打印参考值——层种子、布局哈希、敌人哈希——在编辑器运行之前写进提交正文(`8a4929c`)。UE 侧必须用另一个编译器、另一个进程逐位复现:先是 spike(`5824e68`),然后是评审修复轮后的全链零输入复现(`c7deca2`)。预测失败,里程碑停摆。哈希值本身刻意不在本文重印——仓库的规矩是复现命令才是真源(`m2test floors 7 3`,见 §7),值录在不可变的提交正文里,本文只指路、不复制。
+**先预测,再开引擎。** 一切影响生成的改动都带预注册预测:引擎无关核心用 g++ 独立构建,打印参考值——层种子、布局哈希、敌人哈希——在编辑器运行之前写进提交正文(`8a4929c`)。UE 侧必须用另一个编译器、另一个进程逐位复现:先是 spike(`5824e68`),然后是评审修复轮后的全链零输入复现(`c7deca2`)。预测失败,里程碑停摆。哈希值本身刻意不在本文重印——仓库的规矩是复现命令才是真源(`m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv`,见 §7),值录在不可变的提交正文里,本文只指路、不复制。
 
 **钉住的哈希当回归甲。** seed-7 的布局哈希与敌人哈希在每次高风险改动后重新断言:删模板变体后(`9ffaa26`)、TileSize 默认值切换后(`8faf20a`)、评审修复后(`1463b30`)、M4 基座上(PR #3)。哈希不变,重构才算无害。
 
@@ -183,15 +183,16 @@ git clone https://github.com/My-Denia/uegame.git
 
 预期尾行 `Result: Succeeded`(增量构建实测 16.75s,`8eabc1b`)。`<UE_5.8 安装根>` 即 Epic Launcher 安装 UE_5.8 的目录(Launcher 默认 `C:\Program Files\Epic Games\UE_5.8`;本仓库取证机装在 `(x86)` 变体路径下,以你机器的实际路径为准)。注意:编辑器开着时 Live Coding 会挡 UBT,先关编辑器(`8eabc1b`)。
 
-**玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:FloorManager 在世界初始化后自举一局,钉住的默认种子 7(`c7deca2`)。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
+**玩。** 打开 `uegame\uegame.uproject`,PIE 运行默认地图 Lvl_ThirdPerson(uegame/Config/DefaultEngine.ini:2)。无需任何控制台输入:地图内摆放的 DungeonSpawner(出货入口)在 BeginPlay 起一局,首局种子默认熵源随机(`[RunSeed] source=entropy`);可复现走 `Dungeon.SetRunSeed 7` 或配 `bUseFixedFirstSeed=true`(demo 钉种子 7)。无 spawner 的地图仍由 FloorManager 自举兜底。F 键近战(`593a88b`);踩最远房间的楼梯垫下楼;第 3 层再下即胜(MaxFloors=3,[CombatConfig.csv](uegame/Content/Data/CombatConfig.csv));死亡判负,换链上新种子重开第 1 层。改 CSV 数值后需重启编辑器——加载器是进程级一次性缓存(uegame/Source/uegame/Combat/CombatConfig.cpp:15 的 LoadOnce)。
 
-**取证控制台**(13 个动词,uegame/Source/uegame/DungeonEvidence.cpp:36–498——全部在 `!UE_BUILD_SHIPPING` 门内,含 M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar`,不再编译进 Shipping):
+**取证控制台**(15 个动词,uegame/Source/uegame/DungeonEvidence.cpp:43–692——全部在 `!UE_BUILD_SHIPPING` 门内,含 M2 期的 `Dungeon.Spawn`/`Dungeon.WalkFar`,不再编译进 Shipping):
 
 | 动词 | 用途 |
 |---|---|
-| `Dungeon.StartRun <seed>` | 起一局并锚定种子链(幂等,链漂移后重锚用) |
+| `Dungeon.StartRun <seed>` / `Dungeon.SetRunSeed <n>` | 起一局并锚定种子链(直接) / 钉首局种子并经入口 resolver 重开(复现入口路径) |
 | `Dungeon.Descend` / `Dungeon.FloorStatus` | 排队下楼 / 层·HP·敌数快照 |
-| `Dungeon.SetHP <v>` / `Dungeon.DescendThenDie` | 设 HP(0 触发死亡)/ 同帧下楼+致死复合探针 |
+| `Dungeon.SetHP <v> [holdSec]` / `Dungeon.DescendThenDie` | 设 HP(0 触发死亡;holdSec 开无敌保持)/ 同帧下楼+致死复合探针 |
+| `Dungeon.BalanceReport` | 逐层战斗数值(TTK、K=1/2/4 沥血、缩放)+ 站桩首接触/存活探针 |
 | `Dungeon.Regen <seed>` | 原地重生成(M4 spike 验证路径) |
 | `Dungeon.Spawn <seed> [tile]` / `Dungeon.WalkFar` | 单层生成(拒绝编辑器世界)/ 寻路取证+实走最远房 |
 | `Dungeon.CombatStatus` / `Dungeon.Attack` / `Dungeon.KillNearest` | 战斗快照 / 出刀 / 击杀最近敌 |
@@ -204,10 +205,10 @@ git clone https://github.com/My-Denia/uegame.git
 ```
 bash build.sh                                         # M1 演示 CLI(→ ./dungeon;脚本入库为非执行位,故用 bash 调起)
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic m1_verify.cpp -o m1_verify && ./m1_verify 1000
-g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 3
+g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv
 ```
 
-**确定性自查配方(两条命令级)。** 上面 `m2test floors 7 3` 打印三层的种子与哈希;PIE 里 `Dungeon.StartRun 7` 后逐层下楼,grep 日志里的 planHash / enemyPlan——两侧必须逐位相同。这正是 M4 验收跑过的路径(`8a4929c` → `c7deca2`)。
+**确定性自查配方(两条命令级)。** 上面 `m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv` 打印三层的种子与哈希;PIE 里 `Dungeon.StartRun 7` 后逐层下楼,grep 日志里的 planHash / enemyPlan——两侧必须逐位相同。这正是 M4 验收跑过的路径(`8a4929c` → `c7deca2`)。
 
 ---
 

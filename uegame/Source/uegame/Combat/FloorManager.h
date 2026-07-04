@@ -31,7 +31,18 @@ public:
 	uint64 GetRunSeed() const { return RunSeed; }
 	int32 GetFloorIndex() const { return FloorIndex; }
 
-	/** Begin a run at floor 1 (finds or spawns the dungeon spawner). */
+	/** The single first-run seed authority (contract F, amended: seeded everywhere except this
+	 *  one run-boundary point). Priority: explicit override (Dungeon.SetRunSeed) > bUseFixedFirstSeed
+	 *  config (demo seed 7) > entropy. The ONLY function in gameplay that reads a clock for a seed;
+	 *  everything downstream (deriveFloorSeed, nextRunSeed) stays deterministic. Logs [RunSeed]. */
+	uint64 ResolveFirstRunSeed();
+
+	/** Pin the next first-run seed (Dungeon.SetRunSeed forensic verb). Makes the entry path
+	 *  reproduce a specific seed without touching the entropy call. */
+	void SetExplicitFirstSeed(uint64 InSeed) { ExplicitFirstSeed = InSeed; }
+
+	/** Begin a run at floor 1 (finds or spawns the dungeon spawner). Callers on the entry path
+	 *  pass ResolveFirstRunSeed(); the forensic Dungeon.StartRun passes an explicit seed. */
 	void StartRun(uint64 InRunSeed);
 
 	/** Stairs overlap / Dungeon.Descend. bForce bypasses the clear-gate policy flag. */
@@ -62,4 +73,11 @@ private:
 	int32 FloorIndex = 0;
 	bool bRunActive = false;
 	EPendingTransition PendingTransition = EPendingTransition::None;
+
+	/** Set by Dungeon.SetRunSeed: overrides entropy for the next first-run seed. */
+	TOptional<uint64> ExplicitFirstSeed;
+
+	/** DefaultGame.ini [/Script/uegame.UegameFloorManager] bUseFixedFirstSeed (default false).
+	 *  true => the first run uses the pinned demo seed 7 instead of entropy (portfolio/demo mode). */
+	bool bUseFixedFirstSeed = false;
 };

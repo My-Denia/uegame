@@ -50,7 +50,7 @@ m2_adapter.hpp         M2/M3/M4 engine-agnostic adapter: grid→world mapping, c
 uegame/Source/uegame   UE glue: DungeonSpawner (ISM geometry/collision/runtime navmesh),
    │                     FloorManager (GameInstance subsystem: run/floor state machine), Combat/, DungeonStairs
 uegameEditor           MCP toolset (ExecConsoleCommand/StartPIE/StopPIE/GetPIEStatus)
-                         + 13 Dungeon.* forensic verbs (all shipping-gated, inside !UE_BUILD_SHIPPING)
+                         + 15 Dungeon.* forensic verbs (all shipping-gated, inside !UE_BUILD_SHIPPING)
 ```
 
 Why this split:
@@ -124,7 +124,7 @@ FloorManager (a GameInstance subsystem) owns {runSeed, floorIndex}; floor transi
 
 The transferable part of this project is exactly six disciplines:
 
-**Predict first, then run the engine.** Anything that shapes generation ships with a pre-registered prediction. The engine-agnostic core builds standalone under g++ and prints the reference values — per-floor seeds, layout hashes, enemy-plan hashes — which go into the commit message *before* the editor ever runs (`8a4929c`). Unreal then has to reproduce them byte-for-byte from a different compiler in a different process: first in a spike (`5824e68`), then across the full descend chain with zero console input after the review-fix round (`c7deca2`). A prediction that fails stops the milestone. The hash values themselves are deliberately not restated in this file — the repo's rule is that the reproduce command is the source of truth (`m2test floors 7 3`, see §7), and immutable commit messages hold the recorded values, so this document points rather than copies.
+**Predict first, then run the engine.** Anything that shapes generation ships with a pre-registered prediction. The engine-agnostic core builds standalone under g++ and prints the reference values — per-floor seeds, layout hashes, enemy-plan hashes — which go into the commit message *before* the editor ever runs (`8a4929c`). Unreal then has to reproduce them byte-for-byte from a different compiler in a different process: first in a spike (`5824e68`), then across the full descend chain with zero console input after the review-fix round (`c7deca2`). A prediction that fails stops the milestone. The hash values themselves are deliberately not restated in this file — the repo's rule is that the reproduce command is the source of truth (`m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv`, see §7), and immutable commit messages hold the recorded values, so this document points rather than copies.
 
 **Pinned hashes as regression armor.** The seed-7 layout and enemy hashes are re-asserted after every risky change: after deleting the template variants (`9ffaa26`), after the TileSize default flip (`8faf20a`), after review fixes (`1463b30`), on the M4 base (PR #3). If the pins hold, the refactor was harmless.
 
@@ -183,15 +183,16 @@ git clone https://github.com/My-Denia/uegame.git
 
 Expect the tail line `Result: Succeeded` (a measured incremental build took 16.75s, `8eabc1b`). `<UE_5.8 install root>` is wherever the Epic Launcher installed UE_5.8 (Launcher default `C:\Program Files\Epic Games\UE_5.8`; the machine that produced this repo's evidence has it under the `(x86)` variant — use your actual path). Note: UBT refuses to build while the editor's Live Coding is active — close the editor first (`8eabc1b`).
 
-**Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the FloorManager bootstraps a run after world init with the pinned default seed 7 (`c7deca2`). F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
+**Play.** Open `uegame\uegame.uproject`, hit PIE on the default map Lvl_ThirdPerson (uegame/Config/DefaultEngine.ini:2). No console input needed: the placed DungeonSpawner (the shipping entry) starts a run at BeginPlay; the first-run seed is entropy by default (`[RunSeed] source=entropy`), reproducible via `Dungeon.SetRunSeed 7` or `bUseFixedFirstSeed=true` (demo seed 7). Spawner-less maps still fall back to the FloorManager bootstrap. F = melee (`593a88b`); step on the stairs pad in the farthest room to descend; descending past floor 3 wins (MaxFloors=3, [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv)); death loses and restarts floor 1 on the next chained seed. After editing the CSV, restart the editor — the loader is a process-level load-once cache (LoadOnce at uegame/Source/uegame/Combat/CombatConfig.cpp:15).
 
-**Forensic console** (13 verbs, uegame/Source/uegame/DungeonEvidence.cpp:36–498 — all inside the `!UE_BUILD_SHIPPING` guard, including the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` — none compile into Shipping):
+**Forensic console** (15 verbs, uegame/Source/uegame/DungeonEvidence.cpp:43–692 — all inside the `!UE_BUILD_SHIPPING` guard, including the M2-era `Dungeon.Spawn`/`Dungeon.WalkFar` — none compile into Shipping):
 
 | Verb | Purpose |
 |---|---|
-| `Dungeon.StartRun <seed>` | Start a run and anchor the seed chain (idempotent; re-anchor after chain drift) |
+| `Dungeon.StartRun <seed>` / `Dungeon.SetRunSeed <n>` | Start a run directly at a seed / pin the first-run seed and restart via the entry resolver (reproducible entry path) |
 | `Dungeon.Descend` / `Dungeon.FloorStatus` | Queue a descend / floor·HP·enemy snapshot |
-| `Dungeon.SetHP <v>` / `Dungeon.DescendThenDie` | Set player HP (0 triggers death) / same-tick descend+lethal compound probe |
+| `Dungeon.SetHP <v> [holdSec]` / `Dungeon.DescendThenDie` | Set player HP (0 triggers death; holdSec arms an invincibility hold) / same-tick descend+lethal compound probe |
+| `Dungeon.BalanceReport` | Per-floor combat math (TTK, K=1/2/4 drain, scaling) + standing first-contact/survival probe |
 | `Dungeon.Regen <seed>` | In-place regeneration (the M4 spike path) |
 | `Dungeon.Spawn <seed> [tile]` / `Dungeon.WalkFar` | Single-floor spawn (refuses editor worlds) / navpath evidence + walk to farthest room |
 | `Dungeon.CombatStatus` / `Dungeon.Attack` / `Dungeon.KillNearest` | Combat snapshot / one melee swing / kill nearest enemy |
@@ -204,10 +205,10 @@ Logs land in `uegame/Saved/Logs/uegame.log`; grep anchors: `[RunStarted]` `[Floo
 ```
 bash build.sh                                         # M1 demo CLI (→ ./dungeon; the script is tracked non-executable, hence bash)
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic m1_verify.cpp -o m1_verify && ./m1_verify 1000
-g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 3
+g++ -std=c++17 -O2 m2_adapter_test.cpp -o m2test && ./m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv
 ```
 
-**Determinism self-check, two commands.** `m2test floors 7 3` above prints the per-floor seeds and hashes; in PIE, run `Dungeon.StartRun 7`, descend floor by floor, and grep the log for planHash / enemyPlan — both sides must match bit-for-bit. This is exactly the path the M4 acceptance ran (`8a4929c` → `c7deca2`).
+**Determinism self-check, two commands.** `m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv` above prints the per-floor seeds and hashes; in PIE, run `Dungeon.StartRun 7`, descend floor by floor, and grep the log for planHash / enemyPlan — both sides must match bit-for-bit. This is exactly the path the M4 acceptance ran (`8a4929c` → `c7deca2`).
 
 ---
 

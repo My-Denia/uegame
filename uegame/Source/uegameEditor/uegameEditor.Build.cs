@@ -16,8 +16,9 @@ public class uegameEditor : ModuleRules
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] {
-			"UnrealEd",          // GEditor: PIE start/stop, world resolution
-			"ToolsetRegistry"    // UToolsetDefinition / UToolsetRegistry (MCP tool surface)
+			"UnrealEd",          // GEditor + FEditorFileUtils: PIE control, world resolution, SaveLevel
+			"ToolsetRegistry",   // UToolsetDefinition / UToolsetRegistry (MCP tool surface)
+			"uegame"             // ADungeonSpawner: the DungeonEditor.PlaceSpawnerInLevel placement tool
 		});
 	}
 }

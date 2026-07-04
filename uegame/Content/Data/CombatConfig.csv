@@ -1,2 +1,2 @@
 ---,EnemyMaxHP,EnemyMoveSpeed,EnemyContactDamage,EnemyDamageInterval,PlayerMaxHP,PlayerAttackDamage,PlayerAttackRange,PlayerAttackCooldown,EnemiesPerRoom,PerFloorScaling,bRequireFloorClearToDescend,MaxFloors
-Default,30,350,10,1.0,100,15,250,0.6,2,1.0,false,3
+Default,30,240,7,1.5,140,15,250,0.6,2,0.5,false,3

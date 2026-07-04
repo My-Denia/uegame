@@ -122,10 +122,16 @@ void ADungeonSpawner::BeginPlay()
 					UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld());
 					if (bAutoStartRun && FM && !FM->IsRunActive())
 					{
+						// The run seed comes from the single resolver (entropy by default),
+						// NOT this spawner's editor Seed - a placed spawner is the shipping
+						// ENTRY, not a seed source, so a fresh install gets a random first run.
+						// GetEffectiveSeed64() stays a geometry/enemy-plan seed only (Build,
+						// SpawnEnemies), used for the transient pre-run preview build.
+						const uint64 RunSeed = FM->ResolveFirstRunSeed();
 						UE_LOG(LogTemp, Display,
-							TEXT("[Dungeon] AutoStartRun: runSeed=%llu (from spawner seed)"),
-							static_cast<unsigned long long>(GetEffectiveSeed64()));
-						FM->StartRun(GetEffectiveSeed64());
+							TEXT("[Dungeon] AutoStartRun: runSeed=%llu (placed spawner path)"),
+							static_cast<unsigned long long>(RunSeed));
+						FM->StartRun(RunSeed);
 					}
 				}));
 		}

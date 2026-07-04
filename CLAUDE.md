@@ -9,7 +9,7 @@
   `wsl -e bash -c "g++ -std=c++17 -O2 m2_adapter_test.cpp -o /tmp/m2t && /tmp/m2t floors <runSeed> --csv uegame/Content/Data/CombatConfig.csv"`
   (楼层数默认取表内 MaxFloors,与 FloorManager 判赢层数对齐;取证需要更多层可显式传 n。)
 - 战斗数值唯一来源 `uegame/Content/Data/CombatConfig.csv`。加载器是进程级 LoadOnce 缓存——改 CSV 必须重启编辑器才生效,PIE 重开没用。
-- 地图 `Lvl_ThirdPerson` 里没有摆 DungeonSpawner:运行时由 FloorManager 自举(无 spawner 时用默认种子 7)或 `Dungeon.StartRun` 动态生成。不要按"关卡里有 spawner"的直觉推理。
+- 地图 `Lvl_ThirdPerson` 已摆放 DungeonSpawner(`bAutoStartRun`,出货入口;Run 2 起)。首局种子默认走熵源随机,由 FloorManager 的单一 `ResolveFirstRunSeed` 选定并记 `[RunSeed] source=entropy`(全局唯一熵点,契约 F 修订版);可复现走 `Dungeon.SetRunSeed <n>` 或配置 `bUseFixedFirstSeed=true`(钉 demo 种子 7)。无 spawner 的地图仍由 FloorManager 自举兜底(经同一 resolver)。spawner 的编辑器 `Seed` 只驱动几何预览,不决定跑局种子。
 - 更深的导航/runtime navmesh 细节见 `m2_ue/M2_UE_README.md`。
 
 ## 1. 构建与编辑器周期
