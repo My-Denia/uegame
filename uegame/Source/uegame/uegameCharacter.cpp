@@ -3,6 +3,7 @@
 #include "uegameCharacter.h"
 #include "Engine/LocalPlayer.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/FloorManager.h"
@@ -11,6 +12,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/Controller.h"
+#include "GameFramework/PlayerController.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
@@ -67,6 +69,22 @@ void AuegameCharacter::BeginPlay()
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 	Health->Init(Cfg.PlayerMaxHP);
 	Health->OnDeath.AddDynamic(this, &AuegameCharacter::HandlePlayerDeath);
+	Health->OnDamaged.AddDynamic(this, &AuegameCharacter::HandlePlayerDamaged);
+}
+
+void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageInstigator*/)
+{
+	// Brief red screen pulse via a camera fade (0.5 -> 0 alpha over 0.25s). No UMG asset; the
+	// [Feedback] anchor makes it grep-testable that the pulse fired on the contact-damage event.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StartCameraFade(0.5f, 0.0f, 0.25f, FLinearColor::Red,
+				/*bShouldFadeAudio=*/false, /*bHoldWhenFinished=*/false);
+		}
+	}
+	UE_LOG(LogTemp, Display, TEXT("[Feedback] playerPulse hp=%.0f"), Health ? Health->GetHP() : -1.0f);
 }
 
 void AuegameCharacter::DoAttack()

@@ -52,9 +52,10 @@ namespace
 		// Evidence: echo the active row once, so every combat number in later logs traces here.
 		const FCombatConfigRow& R = GCachedRow;
 		UE_LOG(LogTemp, Display,
-			TEXT("[CombatConfig] source=%s | enemy{MaxHP=%.0f MoveSpeed=%.0f ContactDamage=%.0f DamageInterval=%.2f} player{MaxHP=%.0f AttackDamage=%.0f AttackRange=%.0f AttackCooldown=%.2f} EnemiesPerRoom=%d PerFloorScaling=%.2f requireClearToDescend=%s maxFloors=%d"),
+			TEXT("[CombatConfig] source=%s | enemy{MaxHP=%.0f MoveSpeed=%.0f ContactDamage=%.0f DamageInterval=%.2f AggroRange=%.0f LeashRange=%.0f} player{MaxHP=%.0f AttackDamage=%.0f AttackRange=%.0f AttackCooldown=%.2f} EnemiesPerRoom=%d PerFloorScaling=%.2f requireClearToDescend=%s maxFloors=%d"),
 			GFromTable ? TEXT("DataTable(CSV)") : TEXT("compiled-fallback"),
 			R.EnemyMaxHP, R.EnemyMoveSpeed, R.EnemyContactDamage, R.EnemyDamageInterval,
+			R.AggroRange, R.LeashRange,
 			R.PlayerMaxHP, R.PlayerAttackDamage, R.PlayerAttackRange, R.PlayerAttackCooldown,
 			R.EnemiesPerRoom, R.PerFloorScaling,
 			R.bRequireFloorClearToDescend ? TEXT("true") : TEXT("false"), R.MaxFloors);

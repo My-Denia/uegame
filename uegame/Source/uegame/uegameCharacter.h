@@ -110,6 +110,10 @@ protected:
 	UFUNCTION()
 	void HandlePlayerDeath(AActor* DeadActor);
 
+	/** Run 2.5 feedback: brief red screen pulse (camera fade) when the player takes damage. */
+	UFUNCTION()
+	void HandlePlayerDamaged(float Amount, AActor* DamageInstigator);
+
 private:
 
 	FTimerHandle RestartTimerHandle;

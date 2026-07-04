@@ -716,10 +716,54 @@ void DungeonBalanceReportCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		}), 0.25f);
 }
 
+// Run 2.5 perception forensics: per-enemy {state, dist, LOS, aggro/leash, pos} + a summary.
+// P1 (beyond-range enemy Idle + pos delta 0 across two calls), P2 (wall-blocked in-range
+// enemy Idle los=no), and P4 (chasing=0 at run start) all read off these lines.
+void DungeonAggroStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+
+	int32 Total = 0;
+	int32 Chasing = 0;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* E = *It;
+		if (!IsValid(E))
+		{
+			continue;
+		}
+		const bool bChase = E->IsChasing();
+		const float Dist = Player ? FVector::Dist2D(E->GetActorLocation(), Player->GetActorLocation()) : -1.0f;
+		const bool bLOS = Player ? E->ComputeLOSTo(Player) : false;
+		const FVector P = E->GetActorLocation();
+		if (bChase)
+		{
+			++Chasing;
+		}
+		UE_LOG(LogTemp, Display,
+			TEXT("[AggroStatus] i=%d room=%d state=%s dist=%.0f los=%s aggro=%.0f leash=%.0f pos=(%.0f,%.0f,%.0f)"),
+			Total, E->GetRoomIndex(), bChase ? TEXT("Chasing") : TEXT("Idle"),
+			Dist, bLOS ? TEXT("yes") : TEXT("no"),
+			E->GetAggroRange(), E->GetLeashRange(), P.X, P.Y, P.Z);
+		++Total;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[AggroStatus] summary total=%d chasing=%d idle=%d"),
+		Total, Chasing, Total - Chasing);
+}
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonBalanceReportCmd(
 	TEXT("Dungeon.BalanceReport"),
 	TEXT("Echo per-floor combat math (TTK, K=1/2/4 drain, scaling) + arm the standing first-contact/survival probe"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonBalanceReportCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonAggroStatusCmd(
+	TEXT("Dungeon.AggroStatus"),
+	TEXT("Log per-enemy perception: state (Idle/Chasing), distance, LOS, aggro/leash range, position"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonAggroStatusCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

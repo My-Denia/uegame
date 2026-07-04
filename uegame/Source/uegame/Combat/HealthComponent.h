@@ -8,6 +8,9 @@
 #include "HealthComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FHealthDeathSignature, AActor*, DeadActor);
+/** Fired on every application of real damage (not while dead/invincible, and not for 0). Drives
+ *  Run 2.5 feedback: the enemy hit flash and the player screen pulse bind to this. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FHealthDamagedSignature, float, Amount, AActor*, DamageInstigator);
 
 UCLASS(ClassGroup=(Combat), meta=(BlueprintSpawnableComponent))
 class UEGAME_API UHealthComponent : public UActorComponent
@@ -50,6 +53,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category="Combat")
 	FHealthDeathSignature OnDeath;
+
+	/** Fires on each real damage application (see FHealthDamagedSignature). */
+	UPROPERTY(BlueprintAssignable, Category="Combat")
+	FHealthDamagedSignature OnDamaged;
 
 private:
 	UPROPERTY(VisibleAnywhere, Category="Combat")
