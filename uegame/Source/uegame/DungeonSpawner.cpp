@@ -47,6 +47,7 @@ ADungeonSpawner::ADungeonSpawner()
 		UInstancedStaticMeshComponent* Ism = CreateDefaultSubobject<UInstancedStaticMeshComponent>(Name);
 		Ism->SetupAttachment(Root);
 		Ism->SetCollisionProfileName(TEXT("BlockAll"));   // solid: no walking through walls
+		Ism->SetCollisionObjectType(ECC_WorldStatic);   // explicit: ComputeLOSTo traces ECC_WorldStatic; "BlockAll" only implies it, so pin it (a profile change can't then silently stop walls blocking LOS; same value today -> nav/geometry unchanged)
 		Ism->SetCanEverAffectNavigation(true);            // include in navmesh generation
 		if (CubeMesh)
 		{
@@ -85,12 +86,18 @@ void ADungeonSpawner::BeginPlay()
 		SpawnNavBounds();   // advisory #2: game worlds only, from BeginPlay
 	}
 
-	if (bTeleportPlayerToStart)
+	// On the bAutoStartRun path StartFloor(1) -> RegenerateFloor (next tick) is the sole
+	// player placement, at the RESOLVED run seed. Teleporting here too would first drop the
+	// player at the preview-seed start, then move them again next tick (a one-frame wrong
+	// landing). Static designer spawners (bAutoStartRun=false) still place at BeginPlay.
+	if (bTeleportPlayerToStart && !bAutoStartRun)
 	{
 		if (APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0))
 		{
 			// Floor slab top is ~+5; +100 clears the capsule half-height with margin.
 			Pawn->SetActorLocation(StartWorld + FVector(0.0f, 0.0f, 100.0f));
+			UE_LOG(LogTemp, Display, TEXT("[Placement] player at start (BeginPlay static path) seed=%llu"),
+				static_cast<unsigned long long>(GetEffectiveSeed64()));
 		}
 	}
 
@@ -484,6 +491,8 @@ void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 		if (APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0))
 		{
 			Pawn->SetActorLocation(StartWorld + FVector(0.0f, 0.0f, 100.0f));
+			UE_LOG(LogTemp, Display, TEXT("[Placement] player at start (RegenerateFloor) seed=%llu"),
+				static_cast<unsigned long long>(NewSeed));
 		}
 	}
 	if (bSpawnEnemies)

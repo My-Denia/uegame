@@ -45,8 +45,19 @@ namespace
 
 		if (!GFromTable)
 		{
+#if UE_BUILD_SHIPPING || UE_BUILD_TEST
+			// Packaged (non-editor/non-dev) build: silently running the compiled struct defaults
+			// on a missing/invalid CSV would be a DIFFERENT game (old balance). Fail loudly
+			// instead of shipping wrong numbers. Fatal is compiled into Shipping/Test and aborts
+			// here, so the compiled-fallback row below can never become the live config.
+			UE_LOG(LogTemp, Fatal,
+				TEXT("[CombatConfig] FATAL: %s missing/invalid in a packaged build; refusing to run compiled-fallback balance"),
+				*CsvPath);
+#else
+			// Editor/dev build: warn but keep the compiled fallback so development is never blocked.
 			UE_LOG(LogTemp, Warning,
 				TEXT("[CombatConfig] FALLBACK to compiled defaults - %s missing/invalid"), *CsvPath);
+#endif
 		}
 
 		// Evidence: echo the active row once, so every combat number in later logs traces here.

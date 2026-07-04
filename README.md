@@ -6,9 +6,49 @@
 
 它同时是一次关于"怎么造出来"的实验:M1→M4 全程由 AI coding agent 在证据门禁下实现——预测先于引擎运行被 **预注册**,跨编译器哈希互证,引擎内取证探针,独立审计,跨工具对抗评审。这份 README 同时交代游戏与过程:文中每个数字都能追溯到本仓库的某个提交、PR 线程或文件;凡属人手完成、机器不可达或未经验证之处,原文写明。
 
-状态:v1 完整闭环(M1+M2+M3+M4),`main` 于 2026-07-02 合并 PR #3(合并提交 `94e679d`)。
+状态:v1 冻结基线完整闭环(M1+M2+M3+M4),PR #3 于 2026-07-02 合并(合并提交 `94e679d`)。此后 `main` 又经 Run 2(PR #7)、Run 2.5(PR #10)推进到 `cbd0bff`,加入敌人感知模型、战斗反馈与"清空才可下楼"。
+
+本文分两部分:下面的《当前游戏状态(Run 2.x)》反映线上实际玩到的版本;其后的 **§1–§8 是 v1/M4 冻结事实**,原样保留为历史证据,每个数字仍追溯到它最初的提交/PR/日志锚点。
 
 ---
+
+## 当前游戏状态(Run 2.x)
+
+`main` = `cbd0bff`。Run 2([PR #7](https://github.com/My-Denia/uegame/pull/7),`playability`)带来随机但可复现的首局种子、出货用的关卡内置 spawner、provisional 平衡;Run 2.5([PR #10](https://github.com/My-Denia/uegame/pull/10),`combat-feel`,提交 `b932e21` + `7efdff0`)加入感知模型、战斗反馈、清空才可下楼。引擎无关生成核心(dungeon.hpp / m2_adapter.hpp)自 v1 起逐字节冻结——seed-7 的布局哈希锚点(ts100 `planHash`、ts200 `planHash`、tile 无关 `enemyPlan`)不动;敌人数量与逐层缩放改由下方当前 CSV 驱动。
+
+**当前数值(单一来源 [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv);改表需重启编辑器,加载器是进程级一次性缓存):**
+
+| 字段 | 当前值 |
+|---|---|
+| EnemyMaxHP | 30 |
+| EnemyMoveSpeed | 240 |
+| EnemyContactDamage | 7 |
+| EnemyDamageInterval | 1.5s |
+| AggroRange / LeashRange | 900 / 1400 |
+| PlayerMaxHP | 140 |
+| PlayerAttackDamage / Range / Cooldown | 15 / 250 / 0.6s |
+| EnemiesPerRoom | 2 |
+| PerFloorScaling | 0.5 |
+| bRequireFloorClearToDescend | true |
+| MaxFloors | 3 |
+
+相对 v1/M4 存档平衡的变化(存档值见 §1 记分板 / §3,锚 `ad57d7e` / `1ec27c4`):接触伤害 10 点/1.00s → 7 点/1.5s;玩家 HP 100 → 140;逐层缩放 1.0 → 0.5(floor 3 由每房 6 敌、effHP 90 降到每房 4 敌、effHP 60,三层敌数 16/24/36 而非存档的 16/32/54);下楼门 descend-anytime(false)→ 清空才可下楼(true)。AggroRange/LeashRange 为 Run 2.5 新增。当前逐层集合用 `m2test floors 7 --csv uegame/Content/Data/CombatConfig.csv` 复现(布局 planHash 与存档逐位相同,敌人 enemyHash 随缩放移动)。
+
+**敌人感知模型(Run 2.5)。** 敌人仅在 AggroRange(900)内 **且有视线** 时锁定玩家;视线是 capsule 中心高度的水平 `ECC_WorldStatic` 射线,只有高墙遮挡(薄地板/走廊/门板被同高度射线掠过)。追击后要越过 LeashRange(1400)才脱战(LeashRange > AggroRange = 迟滞;追击中不再复检视线,拐角不闪断)。未锁定的敌人原地待命——不游荡、不隔墙锁定、不造成接触伤害(uegame/Source/uegame/Combat/DungeonEnemy.cpp 的 `PursueTick` / `ComputeLOSTo`;grep 锚 `[Aggro]`)。
+
+**清空才可下楼(Run 2.5)。** `bRequireFloorClearToDescend=true`:楼梯在本层每个有敌房间清空前拒绝下楼(v1 默认是随时可下楼)。边沿触发补丁:玩家站在楼梯垫上时清掉最后一间房,会就地重新触发下楼(`7efdff0`)。
+
+**三个战斗反馈(Run 2.5),都可 grep 日志锚:** (1) 敌人受击白闪(~0.12s,经 `OnDamaged`,`[Feedback] hitFlash`);(2) 每次挥击画扇形攻击弧、命中与否都画(`ENABLE_DRAW_DEBUG` 门内,`[Feedback] attackArc`);(3) 玩家受接触伤害时屏幕红脉冲(相机淡入淡出 0.5→0、0.25s,`[Feedback] playerPulse`)。
+
+**取证动词现为 16 个。** Run 2.5 新增第 16 个 `Dungeon.AggroStatus`;下方 §7 的动词表列的是 v1/M4 的 15 个集合。
+
+**CI(Run 3)。** 4 个引擎无关 g++ 确定性门(`m1verify 1000`、`m2test validate 200`、`enemyDeterminism 500`、`floorsDeterminism 200`,定义在 [CMakeLists.txt](CMakeLists.txt))现由 [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) 在每个 pull request 与推送到 main 时运行——此前这些门只能本地手动跑。
+
+---
+
+## v1 / M4 冻结事实(以下原样保留为历史证据)
+
+> 从这里往下是 v1/M4 的证据记录,逐字保留、未作改动:文中数字追溯到各自最初的锚点(提交/PR/日志)。当前游戏数值见上方《当前游戏状态(Run 2.x)》;旧平衡数字(接触 10 点/1.00s、玩家 HP 100→0、每房 6 敌等)是 v1/M4 期的存档证据,不是当前值。
 
 ## 1. 五分钟版本
 
