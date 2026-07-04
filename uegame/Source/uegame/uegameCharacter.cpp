@@ -8,6 +8,7 @@
 #include "Combat/CombatConfig.h"
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
+#include "Combat/LoadoutComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -60,6 +61,9 @@ AuegameCharacter::AuegameCharacter()
 	// M3 combat: shared health + the single melee attack (numbers from the DataTable row).
 	Health = CreateDefaultSubobject<UHealthComponent>(TEXT("Health"));
 	Combat = CreateDefaultSubobject<UCombatComponent>(TEXT("Combat"));
+
+	// M5 build-diversity: the loadout state holder (reward-on-clear); base stats built in BeginPlay.
+	Loadout = CreateDefaultSubobject<ULoadoutComponent>(TEXT("Loadout"));
 }
 
 void AuegameCharacter::BeginPlay()
@@ -70,6 +74,24 @@ void AuegameCharacter::BeginPlay()
 	Health->Init(Cfg.PlayerMaxHP);
 	Health->OnDeath.AddDynamic(this, &AuegameCharacter::HandlePlayerDeath);
 	Health->OnDamaged.AddDynamic(this, &AuegameCharacter::HandlePlayerDamaged);
+
+	// M5: build the loadout base stats from the same config row (Health is already Init'd, so the base
+	// resolve here deliberately does not re-touch HP).
+	if (Loadout)
+	{
+		Loadout->InitBaseFromConfig();
+	}
+}
+
+void AuegameCharacter::DoChooseLoadout(int32 Index)
+{
+	// Route through the FloorManager: it applies the pick on the loadout component AND re-pokes the stairs
+	// so a player already standing on the pad descends once the reward is taken (single choice code path
+	// shared by Dungeon.ChooseLoadout and keys 1/2/3). No-op outside an active run.
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->TryChooseLoadout(Index);
+	}
 }
 
 void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageInstigator*/)
@@ -136,6 +158,12 @@ void AuegameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 		// M3 melee attack: legacy key bind (F) - coexists with EnhancedInput; the
 		// Dungeon.Attack evidence verb drives the same DoAttack path.
 		PlayerInputComponent->BindKey(EKeys::F, IE_Pressed, this, &AuegameCharacter::DoAttack);
+
+		// M5 loadout choice: legacy number keys 1/2/3 pick offer option 0/1/2. Console verb
+		// Dungeon.ChooseLoadout is the mandated forensic interface; these are the playable path.
+		PlayerInputComponent->BindKey(EKeys::One,   IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey0);
+		PlayerInputComponent->BindKey(EKeys::Two,   IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey1);
+		PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey2);
 	}
 	else
 	{

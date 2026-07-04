@@ -155,6 +155,12 @@ This raises the forensic-verb count from **16** to **17**. The README currently 
 为 16 个" — #12B must update that line and the verb table to **17** in the same PR that adds the verb
 (keep the pinned-count invariant and its doc statement in sync).
 
+> **As implemented (#12B):** the binding adds a **second** shipping-gated verb, `Dungeon.ChooseLoadout
+> <0|1|2>`, as the headless/deterministic pick interface required for no-UI PIE forensics. So the live
+> count goes **16 → 18** (not 17), updated at the LIVE lines only — `README.md:43` and `README.en.md:43`.
+> The frozen v1/M4 "§2 tree" and "§7 table" lines legitimately keep **15** (those sections are preserved
+> verbatim as historical evidence; v1/M4 genuinely had 15 verbs).
+
 ### 8. Affix DataTable / CSV missing policy — mirror `CombatConfig`
 
 The affix pool source (DataTable or CSV) follows the exact policy `CombatConfig::LoadOnce`

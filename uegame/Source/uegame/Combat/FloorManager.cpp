@@ -3,7 +3,9 @@
 #include "FloorManager.h"
 
 #include "CombatConfig.h"
+#include "DungeonStairs.h"
 #include "HealthComponent.h"
+#include "LoadoutComponent.h"
 #include "../DungeonSpawner.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -179,6 +181,7 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 	PendingTransition = EPendingTransition::None;   // a manual (re)start cancels queued intent
 	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d"),
 		static_cast<unsigned long long>(RunSeed), FUegameCombatConfig::Get().MaxFloors);
+	ResetLoadoutForNewRun();   // M5: a run is a fresh build (clears any picks from a prior run this session)
 	StartFloor(1);
 }
 
@@ -246,6 +249,20 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 	{
 		UE_LOG(LogTemp, Display, TEXT("[Stairs] descend BLOCKED by clear-gate policy (enemies alive)"));
 		return;
+	}
+
+	// M5 reward gate: a floor whose reward has not been taken must not be descended past (the reward is
+	// EARNED on clear - descending would skip it). Independent of bRequireFloorClearToDescend; bForce
+	// (Dungeon.Descend / DescendThenDie) still bypasses. Checked synchronously here so no descend is ever
+	// queued while a reward is owed.
+	if (!bForce)
+	{
+		if (const ULoadoutComponent* LC = FindPlayerLoadout(); LC && LC->IsRewardPending())
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[Stairs] descend BLOCKED by reward-pending (pick an affix: Dungeon.ChooseLoadout <0|1|2> or keys 1/2/3)"));
+			return;
+		}
 	}
 
 	UE_LOG(LogTemp, Display, TEXT("[FloorCompleted] floor=%d"), FloorIndex);
@@ -342,6 +359,94 @@ void UUegameFloorManager::RestartRun(const TCHAR* Reason)
 		Reason,
 		static_cast<unsigned long long>(OldSeed),
 		static_cast<unsigned long long>(RunSeed));
+	// M5: reset the build to base BEFORE the heal, so MaxHP is back to base(140) when Revive refills current
+	// HP (never leaves the new run at a prior run's boosted max, never refills-then-tops).
+	ResetLoadoutForNewRun();
 	HealPlayerFull();
 	StartFloor(1);
+}
+
+ULoadoutComponent* UUegameFloorManager::FindPlayerLoadout() const
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	return Pawn ? Pawn->FindComponentByClass<ULoadoutComponent>() : nullptr;
+}
+
+void UUegameFloorManager::ResetLoadoutForNewRun() const
+{
+	if (ULoadoutComponent* LC = FindPlayerLoadout())
+	{
+		LC->ResetForNewRun();
+	}
+}
+
+void UUegameFloorManager::RepokeStairsForDescend() const
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (!World)
+	{
+		return;
+	}
+	// Mirror the clear-time re-poke (DungeonSpawner::NotifyEnemyDead / 7efdff0): OnFloorCleared() is a no-op
+	// unless the player pawn is currently inside the stairs trigger, so this only descends a player who is
+	// already waiting on the pad; otherwise the normal overlap fires when they walk on.
+	for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+	{
+		It->OnFloorCleared();
+	}
+}
+
+void UUegameFloorManager::NotifyFloorCleared()
+{
+	if (!bRunActive)
+	{
+		return;
+	}
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+
+	// Final floor owes no reward: a pre-win offer would be useless (there is no next floor to spend it on),
+	// so leave RewardPending false and let the normal descend -> [RunWon] path run.
+	if (FloorIndex >= Cfg.MaxFloors)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[Loadout] floor=%d is the final floor (maxFloors=%d); no reward offer, win path proceeds"),
+			FloorIndex, Cfg.MaxFloors);
+		return;
+	}
+
+	if (ULoadoutComponent* LC = FindPlayerLoadout())
+	{
+		// Sets RewardPending=true and logs/prints the 3-choose-1 offer. The offer is a pure function of
+		// (runSeed, floorIndex, offerIndex, pool, chosenIds) - it consumes no layout/enemy/floor RNG stream.
+		LC->GenerateOfferForFloor(RunSeed, FloorIndex);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[Loadout] floor %d cleared but the player has no loadout component; no reward offered"), FloorIndex);
+	}
+}
+
+void UUegameFloorManager::TryChooseLoadout(int32 Index)
+{
+	if (!bRunActive)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Loadout] no active run; ChooseLoadout ignored"));
+		return;
+	}
+	ULoadoutComponent* LC = FindPlayerLoadout();
+	if (!LC)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Loadout] no loadout component on player; ChooseLoadout ignored"));
+		return;
+	}
+	if (!LC->ChooseOffer(Index))
+	{
+		return;   // invalid index or nothing pending - ChooseOffer already logged the reason
+	}
+	// Reward taken -> RewardPending is now false. Re-poke the stairs so a player already standing on the pad
+	// descends immediately (otherwise they descend on the next overlap when they step onto the pad).
+	RepokeStairsForDescend();
 }

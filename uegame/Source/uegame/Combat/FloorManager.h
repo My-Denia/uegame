@@ -14,6 +14,7 @@
 #include "FloorManager.generated.h"
 
 class ADungeonSpawner;
+class ULoadoutComponent;
 struct FActorsInitializedParams;
 
 UCLASS()
@@ -45,8 +46,18 @@ public:
 	 *  pass ResolveFirstRunSeed(); the forensic Dungeon.StartRun passes an explicit seed. */
 	void StartRun(uint64 InRunSeed);
 
-	/** Stairs overlap / Dungeon.Descend. bForce bypasses the clear-gate policy flag. */
+	/** Stairs overlap / Dungeon.Descend. bForce bypasses BOTH the clear-gate policy flag AND the M5
+	 *  reward-pending gate (forensic force). */
 	void RequestDescend(bool bForce);
+
+	/** M5: a floor's last enemy room just cleared. If this floor owes a reward (FloorIndex < MaxFloors),
+	 *  generate the 3-choose-1 offer on the player's loadout component and mark the reward pending, which
+	 *  blocks descend until a pick is made. The final floor owes no reward (no useless pre-win offer). */
+	void NotifyFloorCleared();
+
+	/** M5: apply the player's reward pick (0..2) on the loadout component and, on success, re-poke the
+	 *  stairs so a player already on the pad descends. Driven by Dungeon.ChooseLoadout and keys 1/2/3. */
+	void TryChooseLoadout(int32 Index);
 
 	/** Player death during a run: [RunFailed], chain a fresh seed, restart floor 1. */
 	void NotifyRunFailed();
@@ -66,6 +77,13 @@ private:
 	void OnWorldActorsInitialized(const FActorsInitializedParams& Params);
 	ADungeonSpawner* FindSpawner() const;
 	void HealPlayerFull() const;
+
+	/** M5: the player pawn's loadout component (nullptr if no pawn / no component). */
+	ULoadoutComponent* FindPlayerLoadout() const;
+	/** M5: reset the loadout to a fresh base build at run (re)start (picks cleared, MaxHP back to base). */
+	void ResetLoadoutForNewRun() const;
+	/** M5: re-attempt descend on every stairs pad after a reward pick (no-op unless the pawn is on a pad). */
+	void RepokeStairsForDescend() const;
 
 	FDelegateHandle ActorsInitializedHandle;
 

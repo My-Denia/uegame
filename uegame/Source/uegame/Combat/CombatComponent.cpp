@@ -5,6 +5,7 @@
 #include "CombatConfig.h"
 #include "DungeonEnemy.h"
 #include "HealthComponent.h"
+#include "LoadoutComponent.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
@@ -25,12 +26,30 @@ void UCombatComponent::TryAttack()
 	}
 
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+
+	// M5: when the owner carries a loadout component, use its RESOLVED attack interval + damage (the build's
+	// picks applied to the base); otherwise fall back to the raw CSV so bare test maps behave exactly as
+	// before. attack_ms is milliseconds -> seconds for the cooldown. Range stays CSV-driven (not a loadout stat).
+	float AttackCooldown = Cfg.PlayerAttackCooldown;
+	float AttackDamage   = Cfg.PlayerAttackDamage;
+	bool  bFromLoadout   = false;
+	if (const ULoadoutComponent* LC = Owner->FindComponentByClass<ULoadoutComponent>())
+	{
+		if (LC->HasResolvedStats())
+		{
+			AttackCooldown = static_cast<float>(LC->GetResolvedAttackMs()) / 1000.0f;
+			AttackDamage   = static_cast<float>(LC->GetResolvedDamage());
+			bFromLoadout   = true;
+		}
+	}
+
 	const double Now = World->GetTimeSeconds();
-	const double Remaining = Cfg.PlayerAttackCooldown - (Now - LastAttackTime);
+	const double Remaining = AttackCooldown - (Now - LastAttackTime);
 	if (Remaining > 0.0)
 	{
-		// Evidence: cooldown gate (plan-audit delta #4).
-		UE_LOG(LogTemp, Display, TEXT("[Combat] attack REJECTED: on cooldown (%.2fs left)"), Remaining);
+		// Evidence: cooldown gate. Logs the cooldown actually used + its source (resolved vs csv).
+		UE_LOG(LogTemp, Display, TEXT("[Combat] attack REJECTED: on cooldown (%.2fs left, cd=%.2fs %s)"),
+			Remaining, AttackCooldown, bFromLoadout ? TEXT("resolved") : TEXT("csv"));
 		return;
 	}
 	LastAttackTime = Now;
@@ -60,7 +79,7 @@ void UCombatComponent::TryAttack()
 		{
 			if (UHealthComponent* HP = Enemy->FindComponentByClass<UHealthComponent>())
 			{
-				HP->TakeDamage(Cfg.PlayerAttackDamage, Owner);
+				HP->TakeDamage(AttackDamage, Owner);
 				++Hits;
 			}
 		}
@@ -76,6 +95,7 @@ void UCombatComponent::TryAttack()
 	}
 	else
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Combat] attack hit %d enemies (dmg=%.0f each)"), Hits, Cfg.PlayerAttackDamage);
+		UE_LOG(LogTemp, Display, TEXT("[Combat] attack hit %d enemies (dmg=%.0f each, %s)"),
+			Hits, AttackDamage, bFromLoadout ? TEXT("resolved") : TEXT("csv"));
 	}
 }

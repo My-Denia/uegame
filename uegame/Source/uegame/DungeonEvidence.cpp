@@ -18,6 +18,7 @@
 #include "Combat/DungeonEnemy.h"
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
+#include "Combat/LoadoutComponent.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
@@ -764,6 +765,55 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonAggroStatusCmd(
 	TEXT("Dungeon.AggroStatus"),
 	TEXT("Log per-enemy perception: state (Idle/Chasing), distance, LOS, aggro/leash range, position"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonAggroStatusCmd));
+
+// --- M5 build-diversity loadout forensics (PR #12B) ---
+
+// Dump the player's loadout state (runSeed/floor/offerIndex/RewardPending/offer/chosen/resolved/base).
+void DungeonLoadoutStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	APawn* Player = World->GetFirstPlayerController() ? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	ULoadoutComponent* LC = Player ? Player->FindComponentByClass<ULoadoutComponent>() : nullptr;
+	if (!LC)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LoadoutStatus] no loadout component on the player pawn"));
+		return;
+	}
+	LC->LogStatus();
+}
+
+// Headless/forensic reward pick (no UI needed): Dungeon.ChooseLoadout <0|1|2>. Routed through the
+// FloorManager so the pick + stairs re-poke share the exact code path the 1/2/3 keys use.
+void DungeonChooseLoadoutCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || Args.Num() < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ChooseLoadout <0|1|2>"));
+		return;
+	}
+	const int32 Index = FCString::Atoi(*Args[0]);
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->TryChooseLoadout(Index);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] Dungeon.ChooseLoadout needs an active FloorManager"));
+	}
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonLoadoutStatusCmd(
+	TEXT("Dungeon.LoadoutStatus"),
+	TEXT("Log the player's loadout: runSeed, floor, offerIndex, RewardPending, current offer, chosen ids, resolved + base stats"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonLoadoutStatusCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonChooseLoadoutCmd(
+	TEXT("Dungeon.ChooseLoadout"),
+	TEXT("Pick a loadout reward option (headless/forensic): Dungeon.ChooseLoadout <0|1|2>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonChooseLoadoutCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

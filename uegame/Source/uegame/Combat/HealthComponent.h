@@ -45,6 +45,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	void Revive(float NewHP = -1.0f);
 
+	/** M5 loadout: change MaxHP without touching dead/event state - a THIRD path, distinct from Init
+	 *  (refills), SetHP (fires OnDeath at 0), and Revive (clears bDead). bTopUpCurrent raises CurrentHP by
+	 *  the same positive delta as MaxHP, so a +MaxHP build pick is an immediate reward, not "go heal to use
+	 *  it"; a decrease (or bTopUpCurrent=false) clamps CurrentHP down to the new max with no refund. NEVER
+	 *  broadcasts OnDeath/OnDamaged and NEVER clears/sets bDead, so a mid-run re-resolve cannot revive a
+	 *  corpse or re-fire death. */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void SetMaxHP(float NewMaxHP, bool bTopUpCurrent);
+
 	/** Forensic-only (Dungeon.SetHP <v> [holdSec]): while set, TakeDamage is a no-op, so a
 	 *  survival probe cannot be interrupted by a lethal hit - no HP drop, no OnDeath, no queued
 	 *  run-fail. Never set in normal gameplay (default false). */

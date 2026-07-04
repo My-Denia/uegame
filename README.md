@@ -40,7 +40,7 @@
 
 **三个战斗反馈(Run 2.5),都可 grep 日志锚:** (1) 敌人受击白闪(~0.12s,经 `OnDamaged`,`[Feedback] hitFlash`);(2) 每次挥击画扇形攻击弧、命中与否都画(`ENABLE_DRAW_DEBUG` 门内,`[Feedback] attackArc`);(3) 玩家受接触伤害时屏幕红脉冲(相机淡入淡出 0.5→0、0.25s,`[Feedback] playerPulse`)。
 
-**取证动词现为 16 个。** Run 2.5 新增第 16 个 `Dungeon.AggroStatus`;下方 §7 的动词表列的是 v1/M4 的 15 个集合。
+**取证动词现为 18 个。** Run 2.5 新增第 16 个 `Dungeon.AggroStatus`;PR #12B(M5 loadout)新增第 17、18 个 `Dungeon.LoadoutStatus` 与 `Dungeon.ChooseLoadout`(均 shipping-gated,在 `!UE_BUILD_SHIPPING` 门内)。下方 §7 的动词表列的仍是 v1/M4 的 15 个集合(冻结历史)。
 
 **CI(Run 3)。** 4 个引擎无关 g++ 确定性门(`m1verify 1000`、`m2test validate 200`、`enemyDeterminism 500`、`floorsDeterminism 200`,定义在 [CMakeLists.txt](CMakeLists.txt))现由 [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) 在每个 pull request 与推送到 main 时运行——此前这些门只能本地手动跑。
 

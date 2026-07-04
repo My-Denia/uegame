@@ -62,3 +62,28 @@ void UHealthComponent::Revive(float NewHP)
 	UE_LOG(LogTemp, Display, TEXT("[Combat] %s revived, HP=%.0f/%.0f"),
 		*GetNameSafe(GetOwner()), CurrentHP, MaxHP);
 }
+
+void UHealthComponent::SetMaxHP(float NewMaxHP, bool bTopUpCurrent)
+{
+	const float OldMax = MaxHP;
+	const float NewMax = FMath::Max(1.0f, NewMaxHP);   // same floor Init uses
+	const float Delta  = NewMax - OldMax;
+	MaxHP = NewMax;
+
+	if (bTopUpCurrent && Delta > 0.0f)
+	{
+		// A MaxHP increase adds the same delta to current HP (immediate-reward rule, contract #5).
+		CurrentHP = FMath::Min(CurrentHP + Delta, NewMax);
+	}
+	else
+	{
+		// Decrease, or no top-up requested (run reset): clamp current down to the new ceiling, no refund.
+		CurrentHP = FMath::Min(CurrentHP, NewMax);
+	}
+
+	// Deliberately no OnDeath/OnDamaged and no bDead change: this is a stat re-resolve, not damage/heal.
+	// (A pick only happens on a cleared floor with the player alive; the flow never re-resolves a corpse.)
+	UE_LOG(LogTemp, Display, TEXT("[Loadout] %s maxHP %.0f -> %.0f (topUp=%s) | HP %.0f/%.0f"),
+		*GetNameSafe(GetOwner()), OldMax, NewMax,
+		bTopUpCurrent ? TEXT("yes") : TEXT("no"), CurrentHP, MaxHP);
+}
