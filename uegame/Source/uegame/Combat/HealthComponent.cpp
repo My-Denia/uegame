@@ -32,6 +32,9 @@ void UHealthComponent::TakeDamage(float Amount, AActor* DamageInstigator)
 	UE_LOG(LogTemp, Display, TEXT("[Combat] %s took %.0f dmg from %s | HP %.0f -> %.0f"),
 		*GetNameSafe(GetOwner()), Amount, *GetNameSafe(DamageInstigator), OldHP, CurrentHP);
 
+	// Run 2.5 feedback hook: fire before the death check so a lethal hit still flashes.
+	OnDamaged.Broadcast(Amount, DamageInstigator);
+
 	if (CurrentHP <= 0.0f)
 	{
 		bDead = true;

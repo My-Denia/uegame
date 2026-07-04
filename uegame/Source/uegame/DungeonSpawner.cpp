@@ -218,6 +218,22 @@ void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
 		// Evidence (acceptance E).
 		UE_LOG(LogTemp, Display, TEXT("[RoomClear] room=%d cleared (initial=%d)"),
 			InRoomIndex, RoomInitialCounts[InRoomIndex]);
+
+		// If that was the last enemy room, the require-floor-clear gate just opened. The stairs
+		// overlap is edge-triggered but the gate is level-triggered, so a player standing on the
+		// pad when the final enemy falls would otherwise stay stuck until stepping off and back
+		// on. Re-poke the stairs to descend in place. Harmless under descend-anytime (the player
+		// would already have descended on overlap and the pad is gone).
+		if (AreAllRoomsCleared())
+		{
+			if (UWorld* World = GetWorld())
+			{
+				for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+				{
+					It->OnFloorCleared();
+				}
+			}
+		}
 	}
 }
 

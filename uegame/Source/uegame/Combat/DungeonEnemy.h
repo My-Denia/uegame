@@ -14,6 +14,7 @@
 class ADungeonSpawner;
 class UHealthComponent;
 class UStaticMeshComponent;
+class UMaterialInstanceDynamic;
 
 UCLASS()
 class UEGAME_API ADungeonEnemy : public ACharacter
@@ -28,6 +29,14 @@ public:
 
 	int32 GetRoomIndex() const { return RoomIndex; }
 
+	// --- Run 2.5 perception (read by the Dungeon.AggroStatus forensic verb) ---
+	bool IsChasing() const { return bChasing; }
+	float GetAggroRange() const { return AggroRange; }
+	float GetLeashRange() const { return LeashRange; }
+	/** LOS to Target via a WorldStatic-only, strictly-horizontal trace: dungeon walls occlude,
+	 *  dynamic pawns never do. Returns true when nothing blocks the sightline. */
+	bool ComputeLOSTo(const AActor* Target) const;
+
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -37,13 +46,23 @@ private:
 	UFUNCTION()
 	void HandleDeath(AActor* DeadActor);
 
+	/** Run 2.5 hit flash: pulse the body material white on taking damage, restore after ~0.12s. */
+	UFUNCTION()
+	void HandleDamaged(float Amount, AActor* DamageInstigator);
+	void ClearFlash();
+
 	UPROPERTY(VisibleAnywhere, Category="Combat")
 	TObjectPtr<UHealthComponent> Health;
 
 	UPROPERTY(VisibleAnywhere, Category="Combat")
 	TObjectPtr<UStaticMeshComponent> BodyMesh;
 
+	/** Dynamic material instance for the hit flash (created in BeginPlay). */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> BodyMID;
+
 	FTimerHandle PursueTimer;
+	FTimerHandle FlashTimer;
 
 	int32 RoomIndex = -1;
 	TWeakObjectPtr<ADungeonSpawner> SpawnerRef;
@@ -53,6 +72,12 @@ private:
 	/** Contact reach: capsule radii sum + slack; set from capsule sizes at spawn. */
 	float ContactRange = 130.0f;
 	double LastContactDamageTime = -1000.0;
+
+	// --- Run 2.5 perception state (from the DataTable row via InitEnemy) ---
+	/** Idle (false, stands in place) vs Chasing (true). */
+	bool bChasing = false;
+	float AggroRange = 900.0f;
+	float LeashRange = 1400.0f;
 
 	bool bLoggedFirstMove = false;
 };

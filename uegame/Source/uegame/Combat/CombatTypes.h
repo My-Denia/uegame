@@ -28,6 +28,17 @@ struct FCombatConfigRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy")
 	float EnemyDamageInterval = 1.0f;
 
+	/** Run 2.5 perception: acquire the player as a chase target when within this distance AND
+	 *  with line-of-sight. Below this OR no LOS => the enemy stays Idle (stands in place). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy")
+	float AggroRange = 900.0f;
+
+	/** Run 2.5 de-aggro: once chasing, keep chasing until the player is farther than this
+	 *  (LeashRange > AggroRange = hysteresis; LOS is NOT re-checked while chasing, so rounding
+	 *  a corner never flickers aggro). Beyond it => drop back to Idle and stop moving. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy")
+	float LeashRange = 1400.0f;
+
 	// --- player ---
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Player")
 	float PlayerMaxHP = 100.0f;

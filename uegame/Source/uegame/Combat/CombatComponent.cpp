@@ -5,6 +5,7 @@
 #include "CombatConfig.h"
 #include "DungeonEnemy.h"
 #include "HealthComponent.h"
+#include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -39,6 +40,14 @@ void UCombatComponent::TryAttack()
 	const FVector Center = Owner->GetActorLocation() + Owner->GetActorForwardVector() * (R * 0.5f);
 	const float Radius = R * 0.5f;
 
+#if ENABLE_DRAW_DEBUG
+	// Run 2.5 attack legibility: a brief cone shows the swing (visible on misses too). Debug-draw
+	// quality per the art level; ENABLE_DRAW_DEBUG-gated so it costs nothing in Shipping.
+	DrawDebugCone(World, Owner->GetActorLocation(), Owner->GetActorForwardVector(),
+		R, FMath::DegreesToRadians(35.0f), FMath::DegreesToRadians(35.0f),
+		16, FColor::Yellow, /*bPersistentLines=*/false, /*LifeTime=*/0.3f, /*DepthPriority=*/0, /*Thickness=*/1.5f);
+#endif
+
 	int32 Hits = 0;
 	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
 	{
@@ -56,6 +65,9 @@ void UCombatComponent::TryAttack()
 			}
 		}
 	}
+
+	// Run 2.5 feedback anchor: fires on every swing, hit or miss (grep-testable the arc drew).
+	UE_LOG(LogTemp, Display, TEXT("[Feedback] attackArc len=%.0f hits=%d"), R, Hits);
 
 	if (Hits == 0)
 	{
