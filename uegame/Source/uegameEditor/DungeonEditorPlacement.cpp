@@ -81,6 +81,9 @@ void PlaceSpawnerInLevelCmd(const TArray<FString>& Args, UWorld* /*InWorld*/)
 	Spawner->Seed = Seed;
 	Spawner->bAutoStartRun = true;
 	Spawner->SetActorLabel(TEXT("DungeonSpawner_Entry"));
+	// SpawnActor already ran OnConstruction -> Build() at the class-default seed; rebuild now so
+	// the persisted preview geometry matches the requested Seed (cosmetic for non-default seeds).
+	Spawner->Build();
 	Spawner->MarkPackageDirty();
 
 	// Persist the placement in the .umap.

@@ -47,6 +47,10 @@ uint64 UUegameFloorManager::ResolveFirstRunSeed()
 	if (ExplicitFirstSeed.IsSet())
 	{
 		const uint64 S = ExplicitFirstSeed.GetValue();
+		// One-shot: consume the override so a LATER fresh entry in the same GameInstance (e.g. a
+		// map reload/travel during PIE) falls back to bUseFixedFirstSeed/entropy instead of staying
+		// silently pinned to this seed - which would invalidate a subsequent randomness check.
+		ExplicitFirstSeed.Reset();
 		UE_LOG(LogTemp, Display, TEXT("[RunSeed] source=explicit value=%llu"),
 			static_cast<unsigned long long>(S));
 		return S;

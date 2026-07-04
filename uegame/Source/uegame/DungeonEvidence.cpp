@@ -487,31 +487,26 @@ void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
 	const float HoldSec = (Args.Num() > 1) ? FCString::Atof(*Args[1]) : 0.0f;
 	if (HoldSec > 0.0f)
 	{
+		// True invincibility: suppress TakeDamage at the source for holdSec. Re-topping HP from a
+		// ticker raced the death chain (a lethal hit between ticks fires OnDeath -> HandlePlayerDeath
+		// -> FloorManager queues a run-fail before the ticker can react, and neither SetHP nor Revive
+		// cancels that queued restart). Suppressing damage means no HP drop, no OnDeath, no queued
+		// fail - the survival/WalkFar probe runs uninterrupted regardless of incoming damage.
+		HP->SetInvincible(true);
 		TWeakObjectPtr<UHealthComponent> WeakHP = HP;
 		const double StartTime = FPlatformTime::Seconds();
 		UE_LOG(LogTemp, Display,
-			TEXT("[DungeonEvidence] SetHP invincibility hold armed=%.1fs (re-top to full on any drop)"), HoldSec);
+			TEXT("[DungeonEvidence] SetHP invincibility hold armed=%.1fs (TakeDamage suppressed)"), HoldSec);
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
 			[WeakHP, StartTime, HoldSec](float) -> bool
 			{
 				if (!WeakHP.IsValid())
 				{
-					return false;
-				}
-				if (WeakHP->IsDead())
-				{
-					// A lethal hit can land between ticks: TakeDamage fires OnDeath and sets bDead
-					// before this refill runs, and SetHP raises HP without clearing bDead. Revive
-					// clears the death state too, so the hold honors low/lethal values (e.g.
-					// Dungeon.SetHP 1 10) instead of silently letting the run fail.
-					WeakHP->Revive(WeakHP->GetMaxHP());
-				}
-				else if (WeakHP->GetHP() < WeakHP->GetMaxHP())
-				{
-					WeakHP->SetHP(WeakHP->GetMaxHP());   // top up only after damage (limits log noise)
+					return false;   // pawn/PIE gone; the flag died with the component
 				}
 				if (FPlatformTime::Seconds() - StartTime >= HoldSec)
 				{
+					WeakHP->SetInvincible(false);
 					UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] SetHP invincibility hold expired"));
 					return false;
 				}

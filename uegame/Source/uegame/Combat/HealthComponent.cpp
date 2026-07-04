@@ -18,8 +18,11 @@ void UHealthComponent::Init(float InMaxHP)
 
 void UHealthComponent::TakeDamage(float Amount, AActor* DamageInstigator)
 {
-	if (bDead || Amount <= 0.0f)
+	if (bDead || bInvincible || Amount <= 0.0f)
 	{
+		// bInvincible is a forensic hold (Dungeon.SetHP <v> [holdSec]) only; suppressing damage
+		// here means no HP drop => no OnDeath => no queued run-fail, so a survival/WalkFar probe
+		// runs uninterrupted. Never set in normal play.
 		return;
 	}
 	const float OldHP = CurrentHP;
