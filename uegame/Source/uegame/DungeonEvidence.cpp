@@ -493,12 +493,17 @@ void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
 		// cancels that queued restart). Suppressing damage means no HP drop, no OnDeath, no queued
 		// fail - the survival/WalkFar probe runs uninterrupted regardless of incoming damage.
 		HP->SetInvincible(true);
+		// Generation guard: a later overlapping hold supersedes this one, so only the newest
+		// ticker releases the shared flag (otherwise an earlier hold's expiry would drop
+		// invincibility while a later hold is still meant to be active).
+		static int32 GHoldGen = 0;
+		const int32 MyGen = ++GHoldGen;
 		TWeakObjectPtr<UHealthComponent> WeakHP = HP;
 		const double StartTime = FPlatformTime::Seconds();
 		UE_LOG(LogTemp, Display,
 			TEXT("[DungeonEvidence] SetHP invincibility hold armed=%.1fs (TakeDamage suppressed)"), HoldSec);
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-			[WeakHP, StartTime, HoldSec](float) -> bool
+			[WeakHP, StartTime, HoldSec, MyGen](float) -> bool
 			{
 				if (!WeakHP.IsValid())
 				{
@@ -506,8 +511,11 @@ void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
 				}
 				if (FPlatformTime::Seconds() - StartTime >= HoldSec)
 				{
-					WeakHP->SetInvincible(false);
-					UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] SetHP invincibility hold expired"));
+					if (MyGen == GHoldGen)   // still the latest hold - safe to release
+					{
+						WeakHP->SetInvincible(false);
+						UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] SetHP invincibility hold expired"));
+					}
 					return false;
 				}
 				return true;
@@ -598,7 +606,8 @@ void DungeonBalanceReportCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		Cfg.EnemyMaxHP, Cfg.EnemyMoveSpeed, Cfg.EnemyContactDamage, Cfg.EnemyDamageInterval, EffInterval, kEnemyTickSeconds,
 		Cfg.EnemiesPerRoom, Cfg.PerFloorScaling, PerEnemyDPS);
 
-	double Floor1_K2_rate = -1.0, FloorLast_K2_rate = -1.0;
+	double Floor1FullRoomRate = -1.0, FloorLastFullRoomRate = -1.0;
+	int32 Floor1EffPerRoom = 0, FloorLastEffPerRoom = 0;
 	for (int32 F = 1; F <= MaxFloors; ++F)
 	{
 		const double Mult = m2::floorMultiplier(F, Cfg.PerFloorScaling);
@@ -606,27 +615,32 @@ void DungeonBalanceReportCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		const float EffHP = static_cast<float>(Cfg.EnemyMaxHP * Mult);
 		const int32 TTK = (Cfg.PlayerAttackDamage > 0.0f)
 			? FMath::CeilToInt(EffHP / Cfg.PlayerAttackDamage) : -1;
-		// Incoming drain RATE (HP/s) if K enemies converge = K * perEnemyDPS (contact dmg is
-		// floor-invariant: only count/HP scale, so K=2 rate is identical across floors).
+		// Incoming drain RATE (HP/s) if K enemies converge = K * perEnemyDPS. Per-enemy DPS is
+		// floor-invariant (contact dmg doesn't scale), so the K=1/2/4 columns are identical each
+		// floor - they measure crowd size, not scaling. OBJ4 (does scaling stay fair?) instead
+		// compares the FULL-ROOM convergence using the SCALED EffPerRoom, which is what actually
+		// grows with PerFloorScaling (floor1 2 enemies -> floor3 4 at scaling 0.5).
 		const double DrainTimeK1 = (PerEnemyDPS > 0.0) ? (Cfg.PlayerMaxHP / (1.0 * PerEnemyDPS)) : -1.0;
 		const double DrainTimeK2 = (PerEnemyDPS > 0.0) ? (Cfg.PlayerMaxHP / (2.0 * PerEnemyDPS)) : -1.0;
 		const double DrainTimeK4 = (PerEnemyDPS > 0.0) ? (Cfg.PlayerMaxHP / (4.0 * PerEnemyDPS)) : -1.0;
-		if (F == 1) { Floor1_K2_rate = 2.0 * PerEnemyDPS; }
-		if (F == MaxFloors) { FloorLast_K2_rate = 2.0 * PerEnemyDPS; }
+		const double FullRoomRate = static_cast<double>(EffPerRoom) * PerEnemyDPS;
+		if (F == 1) { Floor1FullRoomRate = FullRoomRate; Floor1EffPerRoom = EffPerRoom; }
+		if (F == MaxFloors) { FloorLastFullRoomRate = FullRoomRate; FloorLastEffPerRoom = EffPerRoom; }
 		UE_LOG(LogTemp, Display,
-			TEXT("[BalanceReport] floor=%d effPerRoom=%d effHP=%.0f meleeTTK=%d swings | timeToDrain K1=%.1fs K2=%.1fs K4=%.1fs"),
-			F, EffPerRoom, EffHP, TTK, DrainTimeK1, DrainTimeK2, DrainTimeK4);
+			TEXT("[BalanceReport] floor=%d effPerRoom=%d effHP=%.0f meleeTTK=%d swings | timeToDrain K1=%.1fs K2=%.1fs K4=%.1fs | fullRoomRate=%.1f HP/s"),
+			F, EffPerRoom, EffHP, TTK, DrainTimeK1, DrainTimeK2, DrainTimeK4, FullRoomRate);
 	}
 
 	const int32 TTK1 = (Cfg.PlayerAttackDamage > 0.0f)
 		? FMath::CeilToInt(Cfg.EnemyMaxHP / Cfg.PlayerAttackDamage) : -1;
-	const double RateRatio = (Floor1_K2_rate > 0.0) ? (FloorLast_K2_rate / Floor1_K2_rate) : -1.0;
+	const double RateRatio = (Floor1FullRoomRate > 0.0) ? (FloorLastFullRoomRate / Floor1FullRoomRate) : -1.0;
 	UE_LOG(LogTemp, Display, TEXT("[BalanceReport] === objective floors ==="));
 	UE_LOG(LogTemp, Display, TEXT("[BalanceReport] OBJ2 meleeTTK(floor1)=%d swings  (<=3 => %s)"),
 		TTK1, (TTK1 >= 0 && TTK1 <= 3) ? TEXT("GREEN") : TEXT("RED"));
 	UE_LOG(LogTemp, Display,
-		TEXT("[BalanceReport] OBJ4 floorLast-K2 rate / floor1-K2 rate = %.2fx  (<=2x => %s)"),
-		RateRatio, (RateRatio > 0.0 && RateRatio <= 2.0) ? TEXT("GREEN") : TEXT("RED"));
+		TEXT("[BalanceReport] OBJ4 floorLast full-room drain / floor1 full-room drain = %.2fx  (scaled perRoom %d->%d; <=2x => %s)"),
+		RateRatio, Floor1EffPerRoom, FloorLastEffPerRoom,
+		(RateRatio > 0.0 && RateRatio <= 2.0) ? TEXT("GREEN") : TEXT("RED"));
 	UE_LOG(LogTemp, Display,
 		TEXT("[BalanceReport] OBJ1 first-contact(>=10s) & OBJ3 standing-survival(>=45s): see [BalanceProbe] below (empirical)"));
 
