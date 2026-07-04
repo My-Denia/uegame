@@ -1,0 +1,4 @@
+# The M5 golden vector must be stored verbatim (bare LF, no CRLF translation) so the
+# strict byte-compare in diff_golden.cmake succeeds identically on Windows, WSL/Linux, and CI.
+# The dumper emits LF via a binary std::ofstream; -text stops git from normalizing on checkout.
+golden_m5_loadout_seed7.txt -text
