@@ -498,7 +498,15 @@ void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
 				{
 					return false;
 				}
-				if (WeakHP->GetHP() < WeakHP->GetMaxHP())
+				if (WeakHP->IsDead())
+				{
+					// A lethal hit can land between ticks: TakeDamage fires OnDeath and sets bDead
+					// before this refill runs, and SetHP raises HP without clearing bDead. Revive
+					// clears the death state too, so the hold honors low/lethal values (e.g.
+					// Dungeon.SetHP 1 10) instead of silently letting the run fail.
+					WeakHP->Revive(WeakHP->GetMaxHP());
+				}
+				else if (WeakHP->GetHP() < WeakHP->GetMaxHP())
 				{
 					WeakHP->SetHP(WeakHP->GetMaxHP());   // top up only after damage (limits log noise)
 				}
@@ -575,16 +583,24 @@ void DungeonBalanceReportCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	// fully decidable here; objectives 1 (first-contact) and 3 (standing survival) are empirical
 	// and measured by the standing probe armed at the end (needs an active run).
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
-	const float PerEnemyDPS =
-		(Cfg.EnemyDamageInterval > 0.0f) ? (Cfg.EnemyContactDamage / Cfg.EnemyDamageInterval) : 0.0f;
+	// Contact damage only lands on the enemy's 0.5s PursueTick (ADungeonEnemy sets a 0.5s timer),
+	// and only when Now-lastHit >= DamageInterval - so the EFFECTIVE interval is the nominal one
+	// rounded UP to the next tick (a 1.25s nominal actually fires at 1.5s). Compute DPS from the
+	// effective interval so the report doesn't overstate incoming damage; use 0.5s multiples in
+	// the DataTable to avoid the gap.
+	constexpr float kEnemyTickSeconds = 0.5f;   // == ADungeonEnemy PursueTimer period
+	const float EffInterval = (Cfg.EnemyDamageInterval > 0.0f)
+		? FMath::CeilToFloat(Cfg.EnemyDamageInterval / kEnemyTickSeconds) * kEnemyTickSeconds
+		: 0.0f;
+	const float PerEnemyDPS = (EffInterval > 0.0f) ? (Cfg.EnemyContactDamage / EffInterval) : 0.0f;
 	const int32 MaxFloors = FMath::Max(1, Cfg.MaxFloors);
 
 	UE_LOG(LogTemp, Display, TEXT("[BalanceReport] === DataTable math (source=%s) ==="),
 		FUegameCombatConfig::IsFromDataTable() ? TEXT("CSV") : TEXT("compiled-fallback"));
 	UE_LOG(LogTemp, Display,
-		TEXT("[BalanceReport] player{HP=%.0f atkDmg=%.0f range=%.0f cd=%.2f} enemy{HP=%.0f spd=%.0f dmg=%.0f interval=%.2f} perRoom=%d scaling=%.2f perEnemyDPS=%.2f"),
+		TEXT("[BalanceReport] player{HP=%.0f atkDmg=%.0f range=%.0f cd=%.2f} enemy{HP=%.0f spd=%.0f dmg=%.0f interval=%.2f(eff %.2f @%.1fs tick)} perRoom=%d scaling=%.2f perEnemyDPS=%.2f"),
 		Cfg.PlayerMaxHP, Cfg.PlayerAttackDamage, Cfg.PlayerAttackRange, Cfg.PlayerAttackCooldown,
-		Cfg.EnemyMaxHP, Cfg.EnemyMoveSpeed, Cfg.EnemyContactDamage, Cfg.EnemyDamageInterval,
+		Cfg.EnemyMaxHP, Cfg.EnemyMoveSpeed, Cfg.EnemyContactDamage, Cfg.EnemyDamageInterval, EffInterval, kEnemyTickSeconds,
 		Cfg.EnemiesPerRoom, Cfg.PerFloorScaling, PerEnemyDPS);
 
 	double Floor1_K2_rate = -1.0, FloorLast_K2_rate = -1.0;
