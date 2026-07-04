@@ -220,7 +220,6 @@ m2_adapter.hpp          引擎无关适配层(M2/M3/M4 的哈希、布点、种�
 m1_verify.cpp           独立验证器(仅公共 API;用户提供)
 m2_adapter_test.cpp     适配层 CLI(report/validate/determinism/enemies/floors)
 main.cpp + build.sh     M1 演示 CLI
-CLAUDE.md + AGENTS.md   工作区 agent 操作纪律(两侧语义对齐:Claude 读 CLAUDE,Codex 读 AGENTS)
 m2_ue/M2_UE_README.md   M2 引擎集成深潜(中文:运行时 navmesh 排障三连、复现命令)
 m2_ue/evidence/         6 张取证截图(provenance 经 MD5+时间戳审计,6a9858f)
 uegame/                 UE 5.8 工程(Source/uegame 运行时模块、Source/uegameEditor MCP 模块、
