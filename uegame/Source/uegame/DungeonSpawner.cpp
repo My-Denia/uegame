@@ -11,6 +11,7 @@
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
 #include "Combat/DungeonStairs.h"
+#include "Combat/EncounterConfig.h"
 #include "Combat/FloorManager.h"
 #include "Components/BoxComponent.h"
 #include "Components/BrushComponent.h"
@@ -180,9 +181,62 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 	RoomAliveCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
 	RoomInitialCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
 
-	int32 Spawned = 0;
-	for (const m2::EnemyPlacement& P : Plan)
+	// --- M6B: composition-only assignment over the FROZEN plan. The plan itself (count,
+	// order, room indices, gx/gy/wx/wy) is never touched - the m2 anchors cached here must
+	// stay byte-identical to the pre-M6 baseline. Roles/types come from the m6 core fed by
+	// (runSeed, floorIndex); outside an active run (editor preview, static spawners) the
+	// assignment is skipped and every enemy keeps the Default row exactly as before M6.
+	CachedSpawnPlanHash = m2::spawnPlanHash(Layout, WC);
+	CachedEnemyPlanHash = m2::enemyPlanHash(Plan);
+	bEncounterAssigned = false;
+	CachedRoomRoles.Reset();
+	CachedRoomTypeCounts.Reset();
+	CachedTypeTally = FIntVector::ZeroValue;
+	CachedRoomRoleHash = 0;
+	CachedEnemyTypeHash = 0;
+	EncounterHpMult = (Cfg.EnemyMaxHP > 0.0f) ? (EffCfg.EnemyMaxHP / Cfg.EnemyMaxHP) : 1.0f;
+	TArray<int32> EnemyTypes;
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (FM && FM->IsRunActive() && FUegameEncounterConfig::IsAvailable())
 	{
+		TArray<int32> PlacementRooms;
+		PlacementRooms.Reserve(static_cast<int32>(Plan.size()));
+		for (const m2::EnemyPlacement& P : Plan)
+		{
+			PlacementRooms.Add(P.roomIndex);
+		}
+		TArray<int32> RoomRoles;
+		uint64 RoleHash = 0, TypeHash = 0;
+		if (FUegameEncounterConfig::AssignForFloor(
+				FM->GetRunSeed(), FM->GetFloorIndex(), PlacementRooms,
+				static_cast<int32>(Layout.rooms.size()), Layout.startRoom,
+				RoomRoles, EnemyTypes, RoleHash, TypeHash))
+		{
+			bEncounterAssigned = true;
+			EncounterRunSeed = FM->GetRunSeed();
+			EncounterFloorIndex = FM->GetFloorIndex();
+			CachedRoomRoles = MoveTemp(RoomRoles);
+			CachedRoomRoleHash = RoleHash;
+			CachedEnemyTypeHash = TypeHash;
+			CachedRoomTypeCounts.Init(FIntVector::ZeroValue, static_cast<int32>(Layout.rooms.size()));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[EncounterPlan] assignment failed (inconsistent inputs) - spawning Default-only"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[EncounterPlan] skipped (%s) - spawning Default-only"),
+			(FM && FM->IsRunActive()) ? TEXT("encounter tables unavailable") : TEXT("no active run"));
+	}
+
+	int32 Spawned = 0;
+	for (int32 PlanIdx = 0; PlanIdx < static_cast<int32>(Plan.size()); ++PlanIdx)
+	{
+		const m2::EnemyPlacement& P = Plan[PlanIdx];
 		const FVector Loc(static_cast<float>(P.wx), static_cast<float>(P.wy), 100.0f);
 		ADungeonEnemy* Enemy = World->SpawnActorDeferred<ADungeonEnemy>(
 			ADungeonEnemy::StaticClass(), FTransform(Loc), nullptr, nullptr,
@@ -192,6 +246,17 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 			continue;
 		}
 		Enemy->InitEnemy(EffCfg, P.roomIndex, this);
+		if (bEncounterAssigned && EnemyTypes.IsValidIndex(PlanIdx))
+		{
+			const int32 T = EnemyTypes[PlanIdx];
+			Enemy->ApplyArchetype(FUegameEncounterConfig::GetArchetype(T), EncounterHpMult,
+			                      FUegameEncounterConfig::TypeName(T));
+			if (CachedRoomTypeCounts.IsValidIndex(P.roomIndex) && T >= 0 && T < FUegameEncounterConfig::NumTypes)
+			{
+				CachedRoomTypeCounts[P.roomIndex][T] += 1;
+				CachedTypeTally[T] += 1;
+			}
+		}
 		Enemy->FinishSpawning(FTransform(Loc));
 		++RoomAliveCounts[P.roomIndex];
 		++RoomInitialCounts[P.roomIndex];
@@ -205,8 +270,44 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 		static_cast<unsigned long long>(GetEffectiveSeed64()),
 		EffPerRoom, static_cast<int32>(Plan.size()), Spawned,
 		StartRoomIndex,
-		static_cast<unsigned long long>(m2::enemyPlanHash(Plan)),
+		static_cast<unsigned long long>(CachedEnemyPlanHash),
 		EffCfg.EnemyMaxHP);
+
+	// M6B evidence: the two NEW anchors + role/type composition, formatted to diff against
+	// golden_m6_encounter_seed7.txt field-for-field. Only logged when the assignment ran.
+	if (bEncounterAssigned)
+	{
+		FString RolesStr;
+		int32 RoleTally[FUegameEncounterConfig::NumRoles] = { 0, 0, 0, 0 };
+		for (const int32 R : CachedRoomRoles)
+		{
+			RolesStr += FUegameEncounterConfig::RoleName(R);
+			RolesStr += TEXT(" ");
+			if (R >= 0 && R < FUegameEncounterConfig::NumRoles)
+			{
+				++RoleTally[R];
+			}
+		}
+		RolesStr.TrimEndInline();
+		UE_LOG(LogTemp, Display,
+			TEXT("[EncounterPlan] runSeed=%llu floor=%d floorSeed=%llu enemies=%d roles=%s roleTally: Quiet=%d Standard=%d Skirmish=%d Stronghold=%d typeTally: Grunt=%d Runner=%d Brute=%d roomRoleHash=0x%llx enemyTypeHash=0x%llx spawnPlanHash=0x%llx enemyPlanHash=0x%llx"),
+			static_cast<unsigned long long>(EncounterRunSeed), EncounterFloorIndex,
+			static_cast<unsigned long long>(GetEffectiveSeed64()), Spawned,
+			*RolesStr, RoleTally[0], RoleTally[1], RoleTally[2], RoleTally[3],
+			CachedTypeTally.X, CachedTypeTally.Y, CachedTypeTally.Z,
+			static_cast<unsigned long long>(CachedRoomRoleHash),
+			static_cast<unsigned long long>(CachedEnemyTypeHash),
+			static_cast<unsigned long long>(CachedSpawnPlanHash),
+			static_cast<unsigned long long>(CachedEnemyPlanHash));
+		for (int32 RoomIdx = 0; RoomIdx < CachedRoomRoles.Num(); ++RoomIdx)
+		{
+			const FIntVector C = CachedRoomTypeCounts.IsValidIndex(RoomIdx)
+				? CachedRoomTypeCounts[RoomIdx] : FIntVector::ZeroValue;
+			UE_LOG(LogTemp, Display,
+				TEXT("[EncounterRoom] room=%d role=%s Grunt=%d Runner=%d Brute=%d"),
+				RoomIdx, FUegameEncounterConfig::RoleName(CachedRoomRoles[RoomIdx]), C.X, C.Y, C.Z);
+		}
+	}
 }
 
 void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)

@@ -16,6 +16,7 @@
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
+#include "Combat/EncounterConfig.h"
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
 #include "Combat/LoadoutComponent.h"
@@ -814,6 +815,122 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonChooseLoadoutCmd(
 	TEXT("Dungeon.ChooseLoadout"),
 	TEXT("Pick a loadout reward option (headless/forensic): Dungeon.ChooseLoadout <0|1|2>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonChooseLoadoutCmd));
+
+// --- M6B encounter-diversity forensics (verbs 19-20) ---
+// Both read the spawner's M6 cache (what ACTUALLY spawned this floor), never a recompute -
+// so a hash mismatch here is real evidence, not a second copy of the same math.
+
+// Dump the current floor's room-role assignment + the roomRoleHash anchor.
+void DungeonRoomRolesCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	if (!FM || !FM->IsRunActive() || !Spawner)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RoomRoles] no active run/spawner (use Dungeon.StartRun <seed>)"));
+		return;
+	}
+	if (!Spawner->HasEncounterAssignment())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RoomRoles] no encounter assignment cached (tables unavailable or floor spawned outside a run)"));
+		return;
+	}
+	// Report the spawner's snapshot (what actually spawned); a drift vs the FloorManager's
+	// live state would mean the cache is stale - surface it instead of mixing sources.
+	const uint64 RunSeed = Spawner->GetEncounterRunSeed();
+	const int32 Floor = Spawner->GetEncounterFloorIndex();
+	if (RunSeed != FM->GetRunSeed() || Floor != FM->GetFloorIndex())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RoomRoles] STALE cache: spawner snapshot runSeed=%llu floor=%d vs FloorManager runSeed=%llu floor=%d"),
+			static_cast<unsigned long long>(RunSeed), Floor,
+			static_cast<unsigned long long>(FM->GetRunSeed()), FM->GetFloorIndex());
+	}
+	const uint64 FloorSeed = m2::deriveFloorSeed(RunSeed, Floor);   // no getter exists; same derivation StartFloor logs
+	const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomRoles] runSeed=%llu floor=%d floorSeed=%llu rooms=%d roomRoleHash=0x%llx"),
+		static_cast<unsigned long long>(RunSeed), Floor,
+		static_cast<unsigned long long>(FloorSeed), Roles.Num(),
+		static_cast<unsigned long long>(Spawner->GetCachedRoomRoleHash()));
+	for (int32 RoomIdx = 0; RoomIdx < Roles.Num(); ++RoomIdx)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[RoomRoles] room=%d role=%s"),
+			RoomIdx, FUegameEncounterConfig::RoleName(Roles[RoomIdx]));
+	}
+}
+
+// Dump the current floor's archetype roster (tally + per-room + resolved per-type stats) with
+// the enemyTypeHash anchor AND the preserved m2 anchors (spawnPlanHash/enemyPlanHash).
+void DungeonEnemyRosterCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	if (!FM || !FM->IsRunActive() || !Spawner)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EnemyRoster] no active run/spawner (use Dungeon.StartRun <seed>)"));
+		return;
+	}
+	if (!Spawner->HasEncounterAssignment())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EnemyRoster] no encounter assignment cached (tables unavailable or floor spawned outside a run)"));
+		return;
+	}
+	// Same snapshot-vs-live consistency guard as Dungeon.RoomRoles.
+	if (Spawner->GetEncounterRunSeed() != FM->GetRunSeed() || Spawner->GetEncounterFloorIndex() != FM->GetFloorIndex())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[EnemyRoster] STALE cache: spawner snapshot runSeed=%llu floor=%d vs FloorManager runSeed=%llu floor=%d"),
+			static_cast<unsigned long long>(Spawner->GetEncounterRunSeed()), Spawner->GetEncounterFloorIndex(),
+			static_cast<unsigned long long>(FM->GetRunSeed()), FM->GetFloorIndex());
+	}
+	const FIntVector Tally = Spawner->GetCachedTypeTally();
+	UE_LOG(LogTemp, Display,
+		TEXT("[EnemyRoster] runSeed=%llu floor=%d total=%d Grunt=%d Runner=%d Brute=%d enemyTypeHash=0x%llx spawnPlanHash=0x%llx enemyPlanHash=0x%llx"),
+		static_cast<unsigned long long>(Spawner->GetEncounterRunSeed()), Spawner->GetEncounterFloorIndex(),
+		Tally.X + Tally.Y + Tally.Z, Tally.X, Tally.Y, Tally.Z,
+		static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash()),
+		static_cast<unsigned long long>(Spawner->GetCachedSpawnPlanHash()),
+		static_cast<unsigned long long>(Spawner->GetCachedEnemyPlanHash()));
+	const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+	const TArray<FIntVector>& RoomCounts = Spawner->GetCachedRoomTypeCounts();
+	for (int32 RoomIdx = 0; RoomIdx < Roles.Num(); ++RoomIdx)
+	{
+		const FIntVector C = RoomCounts.IsValidIndex(RoomIdx) ? RoomCounts[RoomIdx] : FIntVector::ZeroValue;
+		UE_LOG(LogTemp, Display,
+			TEXT("[EnemyRoster] room=%d role=%s Grunt=%d Runner=%d Brute=%d"),
+			RoomIdx, FUegameEncounterConfig::RoleName(Roles[RoomIdx]), C.X, C.Y, C.Z);
+	}
+	// Resolved per-type stats (loader table x current floor HP multiplier) - the same numbers
+	// ApplyArchetype stamped on each pawn, so PIE can assert CSV -> pawn without a debugger.
+	const float HpMult = Spawner->GetEncounterHpMult();
+	for (int32 T = 0; T < FUegameEncounterConfig::NumTypes; ++T)
+	{
+		const FEncounterArchetypeStats& S = FUegameEncounterConfig::GetArchetype(T);
+		UE_LOG(LogTemp, Display,
+			TEXT("[EnemyRoster] type=%s hp=%.0f (arch=%.0f x mult=%.2f) speed=%.0f dmg=%.0f interval=%.2f aggro=%.0f leash=%.0f scale=%.2f"),
+			FUegameEncounterConfig::TypeName(T), S.MaxHP * HpMult, S.MaxHP, HpMult,
+			S.MoveSpeed, S.ContactDamage, S.DamageInterval, S.AggroRange, S.LeashRange, S.VisualScale);
+	}
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRoomRolesCmd(
+	TEXT("Dungeon.RoomRoles"),
+	TEXT("Log the current floor's room-role assignment: runSeed, floor, floorSeed, roomRoleHash, per-room role"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRoomRolesCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonEnemyRosterCmd(
+	TEXT("Dungeon.EnemyRoster"),
+	TEXT("Log the current floor's archetype roster: tally, per-room roster, resolved stats, enemyTypeHash + preserved m2 anchors"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonEnemyRosterCmd));
 
 #endif // !UE_BUILD_SHIPPING
 
