@@ -2,3 +2,7 @@
 # strict byte-compare in diff_golden.cmake succeeds identically on Windows, WSL/Linux, and CI.
 # The dumper emits LF via a binary std::ofstream; -text stops git from normalizing on checkout.
 golden_m5_loadout_seed7.txt -text
+
+# The M6 encounter golden vector — same bare-LF discipline as M5 (diff_m6_golden.cmake does a
+# strict byte compare; the dumper emits LF via a binary std::ofstream).
+golden_m6_encounter_seed7.txt -text

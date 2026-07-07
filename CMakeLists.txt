@@ -56,3 +56,31 @@ add_test(NAME m5_loadout_goldenvec
                  -DGOLDEN=${CMAKE_CURRENT_SOURCE_DIR}/golden_m5_loadout_seed7.txt
                  -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/m5_loadout_golden.actual.txt
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/diff_golden.cmake)
+
+# --- M6A encounter-diversity: engine-agnostic core (batch 1; no UE, no gameplay change) ---
+# m6_encounter_test: determinism + fuzz + anchor gate (16 counted sub-checks; exit 0 iff all pass).
+# The test TU includes dungeon.hpp + m2_adapter.hpp only to build the seed-7 witness and PROVE
+# the frozen M1/M2 anchors (spawnPlanHash/enemyPlanHash) are unperturbed; the core never does.
+# CSV paths are passed as args so ctest (run from the build dir) reads the committed source data.
+add_executable(m6_encounter_test test_m6_encounter.cpp m6_encounter.cpp)
+target_sources(m6_encounter_test PRIVATE m6_encounter.hpp m2_adapter.hpp dungeon.hpp)
+
+# m6_encounter_golden: emits the byte-stable golden vector consumed by diff_m6_golden.cmake.
+# Data-driven: reads EncounterWeights.csv (the committed weights are the single source of truth).
+add_executable(m6_encounter_golden dump_m6_encounter_golden.cpp m6_encounter.cpp)
+target_sources(m6_encounter_golden PRIVATE m6_encounter.hpp m2_adapter.hpp dungeon.hpp)
+
+# M6A encounter: determinism + fuzz + no-density/no-position + anchor preservation (~1s).
+add_test(NAME m6_encounter_determinism
+         COMMAND m6_encounter_test
+                 ${CMAKE_CURRENT_SOURCE_DIR}/uegame/Content/Data/EnemyArchetypes.csv
+                 ${CMAKE_CURRENT_SOURCE_DIR}/uegame/Content/Data/EncounterWeights.csv
+                 ${CMAKE_CURRENT_SOURCE_DIR}/uegame/Content/Data/CombatConfig.csv)
+# M6A golden: strict byte-compare of the regenerated (data-driven) golden vs the committed one.
+add_test(NAME m6_encounter_goldenvec
+         COMMAND ${CMAKE_COMMAND}
+                 -DDUMPER=$<TARGET_FILE:m6_encounter_golden>
+                 -DGOLDEN=${CMAKE_CURRENT_SOURCE_DIR}/golden_m6_encounter_seed7.txt
+                 -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/m6_encounter_golden.actual.txt
+                 -DWEIGHTS=${CMAKE_CURRENT_SOURCE_DIR}/uegame/Content/Data/EncounterWeights.csv
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/diff_m6_golden.cmake)

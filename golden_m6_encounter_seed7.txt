@@ -1,0 +1,28 @@
+# M6 encounter golden vector (engine-agnostic core, deterministic, integer-only)
+# run_seed=7  tileSize=200  base_per_room=2  per_floor_scaling=0.5
+# roles: Quiet Standard Skirmish Stronghold ; archetypes: Grunt Runner Brute
+# floorRoleWeights[Quiet,Standard,Skirmish,Stronghold]=0,60,25,15
+# typeWeights Standard[G,R,B]=70,20,10  Skirmish=30,60,10  Stronghold=30,10,60  Quiet=100,0,0
+# preserved m2 anchors (spawnPlanHash/enemyPlanHash) MUST equal the pre-M6 baseline
+floor 1
+  layout: rooms=9 startRoom=0 effCount=2 enemies=16
+  m2anchors: spawnPlanHash=0x83095029d88b10d0 enemyPlanHash=0x748fa4c756a110c2
+  roles: Quiet Stronghold Standard Standard Standard Stronghold Stronghold Stronghold Standard
+  roleTally: Quiet=1 Standard=4 Skirmish=0 Stronghold=4
+  typeTally: Grunt=10 Runner=2 Brute=4
+  m6anchors: roomRoleHash=0x317866b6470f9109 enemyTypeHash=0xaade4446c5dd714d
+floor 2
+  layout: rooms=9 startRoom=0 effCount=3 enemies=24
+  m2anchors: spawnPlanHash=0x5fc3525e6420c061 enemyPlanHash=0xb2baaf1d1864e619
+  roles: Quiet Standard Stronghold Skirmish Standard Standard Stronghold Standard Stronghold
+  roleTally: Quiet=1 Standard=4 Skirmish=1 Stronghold=3
+  typeTally: Grunt=9 Runner=6 Brute=9
+  m6anchors: roomRoleHash=0x467f001ddf7613d8 enemyTypeHash=0xcd7b41918d8f702f
+floor 3
+  layout: rooms=10 startRoom=0 effCount=4 enemies=36
+  m2anchors: spawnPlanHash=0x642f59a16031ffbe enemyPlanHash=0x928a1e2b9a59a5c7
+  roles: Quiet Skirmish Stronghold Skirmish Skirmish Skirmish Skirmish Standard Standard Stronghold
+  roleTally: Quiet=1 Standard=2 Skirmish=5 Stronghold=2
+  typeTally: Grunt=14 Runner=17 Brute=5
+  m6anchors: roomRoleHash=0x36833ce317404855 enemyTypeHash=0xce030e725b790c9a
+nextRunSeed(7)=6951516134914417455
