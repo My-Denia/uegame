@@ -42,7 +42,7 @@
 
 **取证动词现为 20 个。** Run 2.5 新增第 16 个 `Dungeon.AggroStatus`;PR #12B(M5 loadout)新增第 17、18 个 `Dungeon.LoadoutStatus` 与 `Dungeon.ChooseLoadout`;M6B(encounter UE binding)新增第 19、20 个 `Dungeon.RoomRoles`(runSeed/floor/floorSeed/roomRoleHash/每房 role)与 `Dungeon.EnemyRoster`(archetype 计数、每房 roster、resolved stats、enemyTypeHash + 保持不变的 m2 锚)(全部 shipping-gated,在 `!UE_BUILD_SHIPPING` 门内)。下方 §7 的动词表列的仍是 v1/M4 的 15 个集合(冻结历史)。
 
-**CI(Run 3)。** 4 个引擎无关 g++ 确定性门(`m1verify 1000`、`m2test validate 200`、`enemyDeterminism 500`、`floorsDeterminism 200`,定义在 [CMakeLists.txt](CMakeLists.txt))现由 [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) 在每个 pull request 与推送到 main 时运行——此前这些门只能本地手动跑。
+**CI(Run 3 引入,现为 8 门)。** 8 个引擎无关 g++ Core CTest 确定性门(M1–M4 legacy:`m1_validate`、`m2_world_validate`、`m3_enemy_determinism`、`m4_floor_determinism`;M5:`m5_loadout_determinism`、`m5_loadout_goldenvec`;M6:`m6_encounter_determinism`、`m6_encounter_goldenvec`;定义在 [CMakeLists.txt](CMakeLists.txt))由 [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) 在每个 pull request 与推送到 main 时运行——此前这些门只能本地手动跑(CI 于 Run 3 引入时为 4 门,M5/M6 各追加确定性+golden 两门)。
 
 ---
 

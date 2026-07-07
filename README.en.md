@@ -42,7 +42,7 @@ Changes from the v1/M4 archived balance (archived values in the §1 scoreboard /
 
 **Forensic verbs are now 20.** Run 2.5 added the 16th, `Dungeon.AggroStatus`; PR #12B (M5 loadout) added the 17th and 18th, `Dungeon.LoadoutStatus` and `Dungeon.ChooseLoadout`; M6B (encounter UE binding) added the 19th and 20th, `Dungeon.RoomRoles` (runSeed/floor/floorSeed/roomRoleHash/per-room role) and `Dungeon.EnemyRoster` (archetype counts, per-room roster, resolved stats, enemyTypeHash + the unchanged m2 anchors) — all shipping-gated, inside `!UE_BUILD_SHIPPING`. The verb table in §7 below still lists the v1/M4 set of 15 (frozen history).
 
-**CI (Run 3).** The 4 engine-agnostic g++ determinism gates (`m1verify 1000`, `m2test validate 200`, `enemyDeterminism 500`, `floorsDeterminism 200`, defined in [CMakeLists.txt](CMakeLists.txt)) now run on every pull request and push to main via [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) — previously these gates were only runnable locally.
+**CI (introduced in Run 3, now 8 gates).** The 8 engine-agnostic g++ Core CTest determinism gates (M1–M4 legacy: `m1_validate`, `m2_world_validate`, `m3_enemy_determinism`, `m4_floor_determinism`; M5: `m5_loadout_determinism`, `m5_loadout_goldenvec`; M6: `m6_encounter_determinism`, `m6_encounter_goldenvec`; defined in [CMakeLists.txt](CMakeLists.txt)) run on every pull request and push to main via [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) — previously these gates were only runnable locally (CI started with 4 gates in Run 3; M5/M6 each added a determinism+golden pair).
 
 ---
 
