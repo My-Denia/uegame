@@ -1,0 +1,6 @@
+---,Kind,WGrunt,WRunner,WBrute,WQuiet,WStandard,WSkirmish,WStronghold
+Standard,type,70,20,10,0,0,0,0
+Skirmish,type,30,60,10,0,0,0,0
+Stronghold,type,30,10,60,0,0,0,0
+Quiet,type,100,0,0,0,0,0,0
+Floor_Default,floor,0,0,0,0,60,25,15

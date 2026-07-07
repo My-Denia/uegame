@@ -1,0 +1,4 @@
+---,MaxHP,MoveSpeed,ContactDamage,DamageInterval,AggroRange,LeashRange,VisualScale
+Grunt,30,240,7,1.5,900,1400,1.0
+Runner,20,300,5,1.5,900,1400,0.8
+Brute,60,180,10,2.0,900,1400,1.4
