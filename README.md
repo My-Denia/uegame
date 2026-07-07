@@ -6,7 +6,7 @@
 
 它同时是一次关于"怎么造出来"的实验:M1→M4 全程由 AI coding agent 在证据门禁下实现——预测先于引擎运行被 **预注册**,跨编译器哈希互证,引擎内取证探针,独立审计,跨工具对抗评审。这份 README 同时交代游戏与过程:文中每个数字都能追溯到本仓库的某个提交、PR 线程或文件;凡属人手完成、机器不可达或未经验证之处,原文写明。
 
-状态:v1 冻结基线完整闭环(M1+M2+M3+M4),PR #3 于 2026-07-02 合并(合并提交 `94e679d`)。此后 `main` 又经 Run 2(PR #7)、Run 2.5(PR #10)、M5 #12B(PR #13,合并提交 `c943c014`)推进,先后加入敌人感知模型、战斗反馈、"清空才可下楼",以及把 Build 多样性 loadout(非末层清空后三选一、resolved 数值)接进 gameplay。
+状态:v1 冻结基线完整闭环(M1+M2+M3+M4),PR #3 于 2026-07-02 合并(合并提交 `94e679d`)。此后 `main` 又经 Run 2(PR #7)、Run 2.5(PR #10)、M5 #12B(PR #13,合并提交 `c943c014`)、M6B(PR #16,合并提交 `efcb9d31`)推进,先后加入敌人感知模型、战斗反馈、"清空才可下楼"、Build 多样性 loadout(非末层清空后三选一、resolved 数值),以及 Encounter Diversity(房间 role + Grunt/Runner/Brute 三个 stat-only 敌人变体,composition-only)接进 gameplay。
 
 本文分两部分:下面的《当前游戏状态(Run 2.x)》反映线上实际玩到的版本;其后的 **§1–§8 是 v1/M4 冻结事实**,原样保留为历史证据,每个数字仍追溯到它最初的提交/PR/日志锚点。
 
@@ -14,7 +14,7 @@
 
 ## 当前游戏状态(Run 2.x)
 
-`main` 已含 M5 #12B(合并提交 `c943c014`)。Run 2([PR #7](https://github.com/My-Denia/uegame/pull/7),`playability`)带来随机但可复现的首局种子、出货用的关卡内置 spawner、provisional 平衡;Run 2.5([PR #10](https://github.com/My-Denia/uegame/pull/10),`combat-feel`,提交 `b932e21` + `7efdff0`)加入感知模型、战斗反馈、清空才可下楼;M5 #12B([PR #13](https://github.com/My-Denia/uegame/pull/13),`feat/m5-loadout-ue-binding`,合并提交 `c943c014`)把引擎无关的 Build 多样性 loadout 接进 gameplay——非末层清空后弹出三选一词缀,选择即改变 resolved 伤害/攻速/血量,reward-pending 在楼梯门前拦截下楼直到选择;末层不弹、直接走通关(取证动词随之到 18 个,见下);M6(Encounter Diversity)把引擎无关的 m6 核心(房间 role + 敌人 archetype,composition-only)接进 gameplay——每层房间在冻结布局上获得 Quiet/Standard/Skirmish/Stronghold 语义 role,敌人按 role 加权成为 Grunt/Runner/Brute 三 stat 变体(Grunt 与 Default 行逐字段 parity;视觉只缩放 BodyMesh,胶囊/ContactRange 不动;数量、位置、spawnPlanHash/enemyPlanHash 全部保持 M5 基线,新增 roomRoleHash/enemyTypeHash 两锚;取证动词随之到 20 个,见下)。引擎无关生成核心(dungeon.hpp / m2_adapter.hpp)自 v1 起逐字节冻结——seed-7 的布局哈希锚点(ts100 `planHash`、ts200 `planHash`、tile 无关 `enemyPlan`)不动;敌人数量与逐层缩放改由下方当前 CSV 驱动。
+`main` 已含 M6B(PR #16,合并提交 `efcb9d31`)。Run 2([PR #7](https://github.com/My-Denia/uegame/pull/7),`playability`)带来随机但可复现的首局种子、出货用的关卡内置 spawner、provisional 平衡;Run 2.5([PR #10](https://github.com/My-Denia/uegame/pull/10),`combat-feel`,提交 `b932e21` + `7efdff0`)加入感知模型、战斗反馈、清空才可下楼;M5 #12B([PR #13](https://github.com/My-Denia/uegame/pull/13),`feat/m5-loadout-ue-binding`,合并提交 `c943c014`)把引擎无关的 Build 多样性 loadout 接进 gameplay——非末层清空后弹出三选一词缀,选择即改变 resolved 伤害/攻速/血量,reward-pending 在楼梯门前拦截下楼直到选择;末层不弹、直接走通关(取证动词随之到 18 个,见下);M6(Encounter Diversity;核心 [PR #15](https://github.com/My-Denia/uegame/pull/15),UE binding [PR #16](https://github.com/My-Denia/uegame/pull/16),合并提交 `efcb9d31`)把引擎无关的 m6 核心(房间 role + 敌人 archetype,composition-only)接进 gameplay——每层房间在冻结布局上获得 Quiet/Standard/Skirmish/Stronghold 语义 role,敌人按 role 加权成为 Grunt/Runner/Brute 三 stat 变体(Grunt 与 Default 行逐字段 parity;视觉只缩放 BodyMesh,胶囊/ContactRange 不动;数量、位置、spawnPlanHash/enemyPlanHash 全部保持 M5 基线,新增 roomRoleHash/enemyTypeHash 两锚;取证动词随之到 20 个,见下)。引擎无关生成核心(dungeon.hpp / m2_adapter.hpp)自 v1 起逐字节冻结——seed-7 的布局哈希锚点(ts100 `planHash`、ts200 `planHash`、tile 无关 `enemyPlan`)不动;敌人数量与逐层缩放改由下方当前 CSV 驱动。
 
 **当前数值(单一来源 [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv);改表需重启编辑器,加载器是进程级一次性缓存):**
 
