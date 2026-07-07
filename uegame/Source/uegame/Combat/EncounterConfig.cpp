@@ -36,7 +36,11 @@
 #include <string>
 #include <vector>
 
-namespace
+// NAMED private namespace, not an anonymous one: UE unity builds concatenate .cpp files into
+// one TU, where a second anonymous namespace would MERGE with CombatConfig.cpp's and redefine
+// its GLoaded/GFromTable/LoadOnce internals (Codex PR #16 P2). The name keeps these internals
+// out of any sibling file's scope while staying file-private in spirit.
+namespace EncounterConfigPrivate
 {
 	const TCHAR* GTypeNames[FUegameEncounterConfig::NumTypes] = { TEXT("Grunt"), TEXT("Runner"), TEXT("Brute") };
 	const TCHAR* GRoleNames[FUegameEncounterConfig::NumRoles] = { TEXT("Quiet"), TEXT("Standard"), TEXT("Skirmish"), TEXT("Stronghold") };
@@ -249,13 +253,16 @@ namespace
 		const int32 DInt = static_cast<int32>(D.EnemyDamageInterval * 10.0f + 0.5f);
 		const int32 DAg = FMath::RoundToInt(D.AggroRange);
 		const int32 DLe = FMath::RoundToInt(D.LeashRange);
+		// visual_scale_pct == 100 is part of parity: Grunt advertises a faithful reproduction
+		// of the pre-M6 Default enemy, and that includes its appearance (Codex PR #16 P3).
 		if (Grunt.max_hp != DHp || Grunt.move_speed != DMv || Grunt.contact_damage != DDmg ||
-		    Grunt.damage_interval_ds != DInt || Grunt.aggro_range != DAg || Grunt.leash_range != DLe)
+		    Grunt.damage_interval_ds != DInt || Grunt.aggro_range != DAg || Grunt.leash_range != DLe ||
+		    Grunt.visual_scale_pct != 100)
 		{
 			OutError = FString::Printf(
-				TEXT("Grunt/Default parity FAIL: Grunt{hp=%d mv=%d dmg=%d int_ds=%d aggro=%d leash=%d} vs Default{hp=%d mv=%d dmg=%d int_ds=%d aggro=%d leash=%d}"),
+				TEXT("Grunt/Default parity FAIL: Grunt{hp=%d mv=%d dmg=%d int_ds=%d aggro=%d leash=%d scale_pct=%d} vs Default{hp=%d mv=%d dmg=%d int_ds=%d aggro=%d leash=%d scale_pct=100}"),
 				Grunt.max_hp, Grunt.move_speed, Grunt.contact_damage, Grunt.damage_interval_ds,
-				Grunt.aggro_range, Grunt.leash_range, DHp, DMv, DDmg, DInt, DAg, DLe);
+				Grunt.aggro_range, Grunt.leash_range, Grunt.visual_scale_pct, DHp, DMv, DDmg, DInt, DAg, DLe);
 			return false;
 		}
 		return true;
@@ -415,22 +422,25 @@ namespace
 				GTypeW[3][0], GTypeW[3][1], GTypeW[3][2]);
 		}
 	}
-}
+} // namespace EncounterConfigPrivate
 
 bool FUegameEncounterConfig::IsAvailable()
 {
+	using namespace EncounterConfigPrivate;
 	LoadOnce();
 	return GAvailable;
 }
 
 bool FUegameEncounterConfig::IsFromDataTable()
 {
+	using namespace EncounterConfigPrivate;
 	LoadOnce();
 	return GFromTable;
 }
 
 const FEncounterArchetypeStats& FUegameEncounterConfig::GetArchetype(int32 TypeIdx)
 {
+	using namespace EncounterConfigPrivate;
 	LoadOnce();
 	check(TypeIdx >= 0 && TypeIdx < NumTypes);
 	return GStats[TypeIdx];
@@ -438,12 +448,29 @@ const FEncounterArchetypeStats& FUegameEncounterConfig::GetArchetype(int32 TypeI
 
 const TCHAR* FUegameEncounterConfig::TypeName(int32 TypeIdx)
 {
+	using namespace EncounterConfigPrivate;
 	return (TypeIdx >= 0 && TypeIdx < NumTypes) ? GTypeNames[TypeIdx] : TEXT("?");
 }
 
 const TCHAR* FUegameEncounterConfig::RoleName(int32 RoleIdx)
 {
+	using namespace EncounterConfigPrivate;
 	return (RoleIdx >= 0 && RoleIdx < NumRoles) ? GRoleNames[RoleIdx] : TEXT("?");
+}
+
+uint64 FUegameEncounterConfig::TypeSequenceHash(const TArray<int32>& TypeIds)
+{
+	std::vector<m6::TypeId> Types;
+	Types.reserve(TypeIds.Num());
+	for (const int32 T : TypeIds)
+	{
+		if (T < 0 || T >= NumTypes)
+		{
+			return 0;
+		}
+		Types.push_back(static_cast<m6::TypeId>(T));
+	}
+	return m6::enemyTypeHash(Types);
 }
 
 bool FUegameEncounterConfig::AssignForFloor(uint64 RunSeed, int32 FloorIndex,
@@ -452,6 +479,7 @@ bool FUegameEncounterConfig::AssignForFloor(uint64 RunSeed, int32 FloorIndex,
                                             TArray<int32>& OutRoomRoles, TArray<int32>& OutEnemyTypes,
                                             uint64& OutRoomRoleHash, uint64& OutEnemyTypeHash)
 {
+	using namespace EncounterConfigPrivate;
 	LoadOnce();
 	if (!GAvailable || RoomCount <= 0 || StartRoom < 0 || StartRoom >= RoomCount)
 	{

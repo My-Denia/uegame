@@ -44,6 +44,11 @@ struct FUegameEncounterConfig
 	static const TCHAR* TypeName(int32 TypeIdx);
 	static const TCHAR* RoleName(int32 RoleIdx);
 
+	/** m6::enemyTypeHash over a type-id sequence (m6::TypeId order as int32). Lets the spawner
+	 *  hash the ACTUALLY-SPAWNED sequence so Dungeon.EnemyRoster's hash always describes the
+	 *  roster it prints, even if a deferred spawn ever fails. Any out-of-range id returns 0. */
+	static uint64 TypeSequenceHash(const TArray<int32>& TypeIds);
+
 	/** Run the m6 core assignment for one floor over the FROZEN m2 enemy plan.
 	 *  PlacementRoomIndices[k] = room index of the k-th placement, in plan order.
 	 *  Outputs one role per room, one type per placement (same length/order as input),

@@ -234,6 +234,8 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 	}
 
 	int32 Spawned = 0;
+	TArray<int32> SpawnedTypes;   // M6B: type of each enemy that ACTUALLY spawned, plan order
+	SpawnedTypes.Reserve(static_cast<int32>(Plan.size()));
 	for (int32 PlanIdx = 0; PlanIdx < static_cast<int32>(Plan.size()); ++PlanIdx)
 	{
 		const m2::EnemyPlacement& P = Plan[PlanIdx];
@@ -256,11 +258,25 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 				CachedRoomTypeCounts[P.roomIndex][T] += 1;
 				CachedTypeTally[T] += 1;
 			}
+			SpawnedTypes.Add(T);
 		}
 		Enemy->FinishSpawning(FTransform(Loc));
 		++RoomAliveCounts[P.roomIndex];
 		++RoomInitialCounts[P.roomIndex];
 		++Spawned;
+	}
+
+	// M6B: the cached hash must describe the roster the evidence verbs print - i.e. what
+	// actually spawned. On a full spawn (the normal case: AdjustIfPossibleButAlwaysSpawn)
+	// this equals the planned-assignment hash and therefore the golden anchor; if a deferred
+	// spawn ever fails, the hash follows the spawned sequence and the drift is logged loudly
+	// instead of reporting a hash the printed tally cannot reproduce (Codex PR #16 P3).
+	if (bEncounterAssigned && SpawnedTypes.Num() != EnemyTypes.Num())
+	{
+		CachedEnemyTypeHash = FUegameEncounterConfig::TypeSequenceHash(SpawnedTypes);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[EncounterPlan] PARTIAL SPAWN planned=%d spawned=%d - enemyTypeHash now covers the spawned sequence only (golden parity not applicable)"),
+			EnemyTypes.Num(), SpawnedTypes.Num());
 	}
 
 	// Evidence (acceptance B): deterministic enemy plan - tile-invariant hash must equal
