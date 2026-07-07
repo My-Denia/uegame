@@ -14,7 +14,7 @@
 
 ## 当前游戏状态(Run 2.x)
 
-`main` 已含 M5 #12B(合并提交 `c943c014`)。Run 2([PR #7](https://github.com/My-Denia/uegame/pull/7),`playability`)带来随机但可复现的首局种子、出货用的关卡内置 spawner、provisional 平衡;Run 2.5([PR #10](https://github.com/My-Denia/uegame/pull/10),`combat-feel`,提交 `b932e21` + `7efdff0`)加入感知模型、战斗反馈、清空才可下楼;M5 #12B([PR #13](https://github.com/My-Denia/uegame/pull/13),`feat/m5-loadout-ue-binding`,合并提交 `c943c014`)把引擎无关的 Build 多样性 loadout 接进 gameplay——非末层清空后弹出三选一词缀,选择即改变 resolved 伤害/攻速/血量,reward-pending 在楼梯门前拦截下楼直到选择;末层不弹、直接走通关(取证动词随之到 18 个,见下)。引擎无关生成核心(dungeon.hpp / m2_adapter.hpp)自 v1 起逐字节冻结——seed-7 的布局哈希锚点(ts100 `planHash`、ts200 `planHash`、tile 无关 `enemyPlan`)不动;敌人数量与逐层缩放改由下方当前 CSV 驱动。
+`main` 已含 M5 #12B(合并提交 `c943c014`)。Run 2([PR #7](https://github.com/My-Denia/uegame/pull/7),`playability`)带来随机但可复现的首局种子、出货用的关卡内置 spawner、provisional 平衡;Run 2.5([PR #10](https://github.com/My-Denia/uegame/pull/10),`combat-feel`,提交 `b932e21` + `7efdff0`)加入感知模型、战斗反馈、清空才可下楼;M5 #12B([PR #13](https://github.com/My-Denia/uegame/pull/13),`feat/m5-loadout-ue-binding`,合并提交 `c943c014`)把引擎无关的 Build 多样性 loadout 接进 gameplay——非末层清空后弹出三选一词缀,选择即改变 resolved 伤害/攻速/血量,reward-pending 在楼梯门前拦截下楼直到选择;末层不弹、直接走通关(取证动词随之到 18 个,见下);M6(Encounter Diversity)把引擎无关的 m6 核心(房间 role + 敌人 archetype,composition-only)接进 gameplay——每层房间在冻结布局上获得 Quiet/Standard/Skirmish/Stronghold 语义 role,敌人按 role 加权成为 Grunt/Runner/Brute 三 stat 变体(Grunt 与 Default 行逐字段 parity;视觉只缩放 BodyMesh,胶囊/ContactRange 不动;数量、位置、spawnPlanHash/enemyPlanHash 全部保持 M5 基线,新增 roomRoleHash/enemyTypeHash 两锚;取证动词随之到 20 个,见下)。引擎无关生成核心(dungeon.hpp / m2_adapter.hpp)自 v1 起逐字节冻结——seed-7 的布局哈希锚点(ts100 `planHash`、ts200 `planHash`、tile 无关 `enemyPlan`)不动;敌人数量与逐层缩放改由下方当前 CSV 驱动。
 
 **当前数值(单一来源 [CombatConfig.csv](uegame/Content/Data/CombatConfig.csv);改表需重启编辑器,加载器是进程级一次性缓存):**
 
@@ -40,7 +40,7 @@
 
 **三个战斗反馈(Run 2.5),都可 grep 日志锚:** (1) 敌人受击白闪(~0.12s,经 `OnDamaged`,`[Feedback] hitFlash`);(2) 每次挥击画扇形攻击弧、命中与否都画(`ENABLE_DRAW_DEBUG` 门内,`[Feedback] attackArc`);(3) 玩家受接触伤害时屏幕红脉冲(相机淡入淡出 0.5→0、0.25s,`[Feedback] playerPulse`)。
 
-**取证动词现为 18 个。** Run 2.5 新增第 16 个 `Dungeon.AggroStatus`;PR #12B(M5 loadout)新增第 17、18 个 `Dungeon.LoadoutStatus` 与 `Dungeon.ChooseLoadout`(均 shipping-gated,在 `!UE_BUILD_SHIPPING` 门内)。下方 §7 的动词表列的仍是 v1/M4 的 15 个集合(冻结历史)。
+**取证动词现为 20 个。** Run 2.5 新增第 16 个 `Dungeon.AggroStatus`;PR #12B(M5 loadout)新增第 17、18 个 `Dungeon.LoadoutStatus` 与 `Dungeon.ChooseLoadout`;M6B(encounter UE binding)新增第 19、20 个 `Dungeon.RoomRoles`(runSeed/floor/floorSeed/roomRoleHash/每房 role)与 `Dungeon.EnemyRoster`(archetype 计数、每房 roster、resolved stats、enemyTypeHash + 保持不变的 m2 锚)(全部 shipping-gated,在 `!UE_BUILD_SHIPPING` 门内)。下方 §7 的动词表列的仍是 v1/M4 的 15 个集合(冻结历史)。
 
 **CI(Run 3)。** 4 个引擎无关 g++ 确定性门(`m1verify 1000`、`m2test validate 200`、`enemyDeterminism 500`、`floorsDeterminism 200`,定义在 [CMakeLists.txt](CMakeLists.txt))现由 [.github/workflows/core-ctest.yml](.github/workflows/core-ctest.yml) 在每个 pull request 与推送到 main 时运行——此前这些门只能本地手动跑。
 

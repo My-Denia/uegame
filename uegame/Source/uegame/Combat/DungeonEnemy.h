@@ -15,6 +15,7 @@ class ADungeonSpawner;
 class UHealthComponent;
 class UStaticMeshComponent;
 class UMaterialInstanceDynamic;
+struct FEncounterArchetypeStats;
 
 UCLASS()
 class UEGAME_API ADungeonEnemy : public ACharacter
@@ -26,6 +27,14 @@ public:
 
 	/** Apply the DataTable row + room bookkeeping. Call between deferred spawn and FinishSpawning. */
 	void InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, ADungeonSpawner* InSpawner);
+
+	/** M6B: overlay one archetype's stats (stat-only variant - Grunt equals Default by the
+	 *  loader's parity gate, so the Grunt path is behaviourally identical to pre-M6 spawns).
+	 *  InHpMult re-applies the M4 per-floor HP multiplier to the archetype's base HP.
+	 *  Call AFTER InitEnemy and before FinishSpawning. Scales ONLY the visual BodyMesh;
+	 *  the capsule, nav agent, ContactRange, AI state machine, and hit-flash material are
+	 *  untouched by contract. */
+	void ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, const TCHAR* InTypeName);
 
 	int32 GetRoomIndex() const { return RoomIndex; }
 

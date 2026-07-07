@@ -109,6 +109,26 @@ public:
 	}
 	int32 GetStartRoomIndex() const { return StartRoomIndex; }
 
+	// --- M6B encounter cache (evidence surface for Dungeon.RoomRoles / Dungeon.EnemyRoster;
+	//     written by SpawnEnemies from what ACTUALLY spawned, never recomputed on read) ---
+
+	/** True when the last SpawnEnemies ran the M6 assignment (active run + validated tables). */
+	bool HasEncounterAssignment() const { return bEncounterAssigned; }
+	uint64 GetEncounterRunSeed() const { return EncounterRunSeed; }
+	int32 GetEncounterFloorIndex() const { return EncounterFloorIndex; }
+	float GetEncounterHpMult() const { return EncounterHpMult; }
+	uint64 GetCachedRoomRoleHash() const { return CachedRoomRoleHash; }
+	uint64 GetCachedEnemyTypeHash() const { return CachedEnemyTypeHash; }
+	/** m2 anchors for the same plan, cached at spawn time (baseline-unchanged evidence). */
+	uint64 GetCachedSpawnPlanHash() const { return CachedSpawnPlanHash; }
+	uint64 GetCachedEnemyPlanHash() const { return CachedEnemyPlanHash; }
+	/** One m6::RoleId-as-int per room index. */
+	const TArray<int32>& GetCachedRoomRoles() const { return CachedRoomRoles; }
+	/** Per-room spawned archetype counts (X=Grunt, Y=Runner, Z=Brute). */
+	const TArray<FIntVector>& GetCachedRoomTypeCounts() const { return CachedRoomTypeCounts; }
+	/** Whole-floor spawned archetype tally (X=Grunt, Y=Runner, Z=Brute). */
+	FIntVector GetCachedTypeTally() const { return CachedTypeTally; }
+
 	/** M4: true when every room that started with enemies has zero alive. */
 	bool AreAllRoomsCleared() const
 	{
@@ -166,4 +186,17 @@ private:
 	/** M3 per-room enemy bookkeeping; written by SpawnEnemies(). */
 	TArray<int32> RoomAliveCounts;
 	TArray<int32> RoomInitialCounts;
+
+	// --- M6B encounter cache backing fields (see public accessors above) ---
+	bool bEncounterAssigned = false;
+	uint64 EncounterRunSeed = 0;
+	int32 EncounterFloorIndex = 0;
+	float EncounterHpMult = 1.0f;
+	uint64 CachedRoomRoleHash = 0;
+	uint64 CachedEnemyTypeHash = 0;
+	uint64 CachedSpawnPlanHash = 0;
+	uint64 CachedEnemyPlanHash = 0;
+	TArray<int32> CachedRoomRoles;
+	TArray<FIntVector> CachedRoomTypeCounts;
+	FIntVector CachedTypeTally = FIntVector::ZeroValue;
 };

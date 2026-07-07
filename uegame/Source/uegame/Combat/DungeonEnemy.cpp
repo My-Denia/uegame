@@ -4,6 +4,7 @@
 
 #include "AIController.h"
 #include "CombatConfig.h"
+#include "EncounterConfig.h"
 #include "HealthComponent.h"
 #include "../DungeonSpawner.h"
 #include "CollisionQueryParams.h"
@@ -76,6 +77,39 @@ void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, AD
 	Health->Init(Row.EnemyMaxHP);
 	// Contact reach = my capsule + a typical player capsule (42) + slack.
 	ContactRange = GetCapsuleComponent()->GetScaledCapsuleRadius() + 42.0f + 40.0f;
+}
+
+void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, const TCHAR* InTypeName)
+{
+	// Stat-only overlay of the 6 fields InitEnemy set from the Default row. The archetype's
+	// base HP re-applies the M4 per-floor multiplier so floor scaling semantics are preserved
+	// (Grunt: arch == Default, so hp == the pre-M6 EffHP exactly).
+	const float EffHP = Stats.MaxHP * InHpMult;
+	ContactDamage = Stats.ContactDamage;
+	DamageInterval = Stats.DamageInterval;
+	AggroRange = Stats.AggroRange;
+	LeashRange = Stats.LeashRange;
+	GetCharacterMovement()->MaxWalkSpeed = Stats.MoveSpeed;
+	Health->Init(EffHP);
+
+	// Visual-only size cue: scale the BodyMesh relative to its constructor baseline and drop
+	// its bottom back onto the capsule bottom (base mesh half-height == capsule half-height
+	// == 88, so offset = 88*(s-1)). The capsule, nav agent, and ContactRange are deliberately
+	// NOT touched - collision and contact behaviour must not vary by archetype.
+	const float S = Stats.VisualScale;
+	if (BodyMesh && !FMath::IsNearlyEqual(S, 1.0f))
+	{
+		BodyMesh->SetRelativeScale3D(FVector(0.68f * S, 0.68f * S, 1.76f * S));
+		BodyMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 88.0f * (S - 1.0f)));
+	}
+
+	// Evidence anchor: resolved stats + the proof that scale stayed visual-only (capsule
+	// radius and ContactRange on the same line, unchanged across archetypes).
+	UE_LOG(LogTemp, Display,
+		TEXT("[EncounterApply] room=%d type=%s hp=%.0f (arch=%.0f x mult=%.2f) speed=%.0f dmg=%.0f interval=%.2f aggro=%.0f leash=%.0f meshScale=%.2f capsuleR=%.0f contactRange=%.0f"),
+		RoomIndex, InTypeName ? InTypeName : TEXT("?"), EffHP, Stats.MaxHP, InHpMult,
+		Stats.MoveSpeed, Stats.ContactDamage, Stats.DamageInterval, Stats.AggroRange, Stats.LeashRange,
+		S, GetCapsuleComponent()->GetScaledCapsuleRadius(), ContactRange);
 }
 
 bool ADungeonEnemy::ComputeLOSTo(const AActor* Target) const
