@@ -216,7 +216,10 @@ void AUegameHUD::DrawHUD()
 
 		if (bStale)
 		{
-			Right.Add({ TEXT("Room role: (stale cache)"), kDim });
+			// Truthfulness: a stale snapshot must not surface ANY encounter data as current - not the
+			// role, and not the tally/typeHash either (they come from the same snapshot). Show one
+			// honest "(stale cache)" line and nothing that could be mistaken for the live floor.
+			Right.Add({ TEXT("Encounter: (stale cache)"), kDim });
 		}
 		else
 		{
@@ -231,12 +234,12 @@ void AUegameHUD::DrawHUD()
 			{
 				Right.Add({ TEXT("Room role: (n/a)"), kDim });
 			}
-		}
 
-		const FIntVector T = Spawner->GetCachedTypeTally();
-		Right.Add({ FString::Printf(TEXT("Enemies    Grunt %d  Runner %d  Brute %d"), T.X, T.Y, T.Z), kBody });
-		Right.Add({ FString::Printf(TEXT("typeHash   0x%llx"),
-			static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+			const FIntVector T = Spawner->GetCachedTypeTally();
+			Right.Add({ FString::Printf(TEXT("Enemies    Grunt %d  Runner %d  Brute %d"), T.X, T.Y, T.Z), kBody });
+			Right.Add({ FString::Printf(TEXT("typeHash   0x%llx"),
+				static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+		}
 	}
 	else
 	{
