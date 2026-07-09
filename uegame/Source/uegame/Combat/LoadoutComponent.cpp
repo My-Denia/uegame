@@ -4,7 +4,6 @@
 
 #include "CombatConfig.h"
 #include "HealthComponent.h"
-#include "Engine/Engine.h"          // GEngine (on-screen debug offer)
 #include "GameFramework/Actor.h"
 
 // Engine-agnostic loadout core - .cpp-only include (repo-root PrivateIncludePaths, uegame.Build.cs).
@@ -208,11 +207,10 @@ bool ULoadoutComponent::GenerateOfferForFloor(uint64 InRunSeed, int32 InFloorInd
 		TEXT("[Loadout] RewardPending=true on floor %d (descend blocked until a pick: Dungeon.ChooseLoadout <0|1|2> or keys 1/2/3)"),
 		InFloorIndex);
 
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 30.0f, FColor::Yellow,
-			FString::Printf(TEXT("REWARD - pick an affix (1/2/3):  %s"), *Pretty));
-	}
+	// M7A.1: the offer is now shown by the truthful readability HUD (AUegameHUD's REWARD PENDING panel,
+	// which reads CurrentOfferIds live and labels them via DescribeAffixById). The old transient yellow
+	// AddOnScreenDebugMessage was redundant and overlapped the panel, so it is removed (owner readout
+	// item 2). The [Loadout] offer/RewardPending UE_LOG lines above stay as the forensic record.
 	return true;
 }
 
@@ -267,6 +265,17 @@ void ULoadoutComponent::ResetForNewRun()
 	UE_LOG(LogTemp, Display,
 		TEXT("[Loadout] reset for new run (picks cleared; resolved back to base dmg=%d max_hp=%d)"),
 		ResolvedDamage, ResolvedMaxHP);
+}
+
+FString ULoadoutComponent::DescribeAffixById(int32 Id) const
+{
+	// Single source of truth: the same pool lookup + formatter that produced the offer/chosen strings
+	// in the log. The HUD calls this so its labels can never drift from what Dungeon.LoadoutStatus shows.
+	if (const m5::Affix* A = FindAffixById(static_cast<uint32>(Id)))
+	{
+		return DescribeAffix(*A);
+	}
+	return TEXT("?");
 }
 
 void ULoadoutComponent::LogStatus() const
