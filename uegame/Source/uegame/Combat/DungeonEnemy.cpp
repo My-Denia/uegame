@@ -69,6 +69,9 @@ void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, AD
 {
 	RoomIndex = InRoomIndex;
 	SpawnerRef = InSpawner;
+	// M7A.2: explicit reset - identity is "unassigned" until ApplyArchetype runs, so the
+	// static-spawner / encounter-unavailable path can never inherit a stale id.
+	ArchetypeTypeId = INDEX_NONE;
 	ContactDamage = Row.EnemyContactDamage;
 	DamageInterval = Row.EnemyDamageInterval;
 	AggroRange = Row.AggroRange;
@@ -79,8 +82,11 @@ void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, AD
 	ContactRange = GetCapsuleComponent()->GetScaledCapsuleRadius() + 42.0f + 40.0f;
 }
 
-void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, const TCHAR* InTypeName)
+void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, int32 InTypeId)
 {
+	// M7A.2: the numeric id IS the identity; the display/log name below is derived from it.
+	ArchetypeTypeId = InTypeId;
+
 	// Stat-only overlay of the 6 fields InitEnemy set from the Default row. The archetype's
 	// base HP re-applies the M4 per-floor multiplier so floor scaling semantics are preserved
 	// (Grunt: arch == Default, so hp == the pre-M6 EffHP exactly).
@@ -104,12 +110,23 @@ void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float 
 	}
 
 	// Evidence anchor: resolved stats + the proof that scale stayed visual-only (capsule
-	// radius and ContactRange on the same line, unchanged across archetypes).
+	// radius and ContactRange on the same line, unchanged across archetypes). The name is
+	// derived from the id (TypeName is bounds-safe: out-of-range prints "?", matching the
+	// old null-name fallback), so this line stays byte-identical to the pre-M7A.2 format.
 	UE_LOG(LogTemp, Display,
 		TEXT("[EncounterApply] room=%d type=%s hp=%.0f (arch=%.0f x mult=%.2f) speed=%.0f dmg=%.0f interval=%.2f aggro=%.0f leash=%.0f meshScale=%.2f capsuleR=%.0f contactRange=%.0f"),
-		RoomIndex, InTypeName ? InTypeName : TEXT("?"), EffHP, Stats.MaxHP, InHpMult,
+		RoomIndex, FUegameEncounterConfig::TypeName(InTypeId), EffHP, Stats.MaxHP, InHpMult,
 		Stats.MoveSpeed, Stats.ContactDamage, Stats.DamageInterval, Stats.AggroRange, Stats.LeashRange,
 		S, GetCapsuleComponent()->GetScaledCapsuleRadius(), ContactRange);
+}
+
+const TCHAR* ADungeonEnemy::GetArchetypeDisplayName() const
+{
+	// Owner ruling (M7A.2): unassigned reads as neutral "Enemy" - never "Grunt" (a lie about
+	// the no-assignment path) and not "Default" (implementation vocabulary, not player-facing).
+	return HasArchetypeAssignment()
+		? FUegameEncounterConfig::TypeName(ArchetypeTypeId)
+		: TEXT("Enemy");
 }
 
 bool ADungeonEnemy::ComputeLOSTo(const AActor* Target) const

@@ -31,12 +31,28 @@ public:
 	/** M6B: overlay one archetype's stats (stat-only variant - Grunt equals Default by the
 	 *  loader's parity gate, so the Grunt path is behaviourally identical to pre-M6 spawns).
 	 *  InHpMult re-applies the M4 per-floor HP multiplier to the archetype's base HP.
+	 *  InTypeId (m6::TypeId order) is stored as this enemy's authoritative identity; the
+	 *  log/display name is always DERIVED from it via FUegameEncounterConfig::TypeName.
 	 *  Call AFTER InitEnemy and before FinishSpawning. Scales ONLY the visual BodyMesh;
 	 *  the capsule, nav agent, ContactRange, AI state machine, and hit-flash material are
 	 *  untouched by contract. */
-	void ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, const TCHAR* InTypeName);
+	void ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, int32 InTypeId);
 
 	int32 GetRoomIndex() const { return RoomIndex; }
+
+	// --- M7A.2 read-only identity/HP surface (consumed by the AUegameHUD enemy readout) ---
+	/** True only after ApplyArchetype ran (M6 assignment). The static-spawner /
+	 *  encounter-unavailable path never assigns and must read as a neutral "Enemy",
+	 *  never as "Grunt". */
+	bool HasArchetypeAssignment() const { return ArchetypeTypeId != INDEX_NONE; }
+	/** Archetype id in m6::TypeId order; INDEX_NONE while unassigned. The numeric id is
+	 *  the authoritative identity - display names are derived, never stored. */
+	int32 GetArchetypeTypeId() const { return ArchetypeTypeId; }
+	/** Derived, never stored: TypeName(id) when assigned, "Enemy" otherwise. */
+	const TCHAR* GetArchetypeDisplayName() const;
+	/** Read-only HP truth source for presentation. Const pointer: only the const getters
+	 *  (GetHP/GetMaxHP/IsDead) are reachable, every mutator is non-const and blocked. */
+	const UHealthComponent* GetHealthComponent() const { return Health; }
 
 	// --- Run 2.5 perception (read by the Dungeon.AggroStatus forensic verb) ---
 	bool IsChasing() const { return bChasing; }
@@ -74,6 +90,10 @@ private:
 	FTimerHandle FlashTimer;
 
 	int32 RoomIndex = -1;
+	/** M7A.2: archetype identity (m6::TypeId order); INDEX_NONE = no M6 assignment.
+	 *  Reset by InitEnemy, set only by ApplyArchetype. Not reflected: presentation-facing
+	 *  runtime state, never serialized and never exposed for mutation. */
+	int32 ArchetypeTypeId = INDEX_NONE;
 	TWeakObjectPtr<ADungeonSpawner> SpawnerRef;
 
 	float ContactDamage = 10.0f;

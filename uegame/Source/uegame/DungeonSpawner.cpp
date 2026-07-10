@@ -251,8 +251,7 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 		if (bEncounterAssigned && EnemyTypes.IsValidIndex(PlanIdx))
 		{
 			const int32 T = EnemyTypes[PlanIdx];
-			Enemy->ApplyArchetype(FUegameEncounterConfig::GetArchetype(T), EncounterHpMult,
-			                      FUegameEncounterConfig::TypeName(T));
+			Enemy->ApplyArchetype(FUegameEncounterConfig::GetArchetype(T), EncounterHpMult, T);
 			if (CachedRoomTypeCounts.IsValidIndex(P.roomIndex) && T >= 0 && T < FUegameEncounterConfig::NumTypes)
 			{
 				CachedRoomTypeCounts[P.roomIndex][T] += 1;

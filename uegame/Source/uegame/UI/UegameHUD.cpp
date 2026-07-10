@@ -2,14 +2,19 @@
 
 #include "UegameHUD.h"
 
+#include "Camera/PlayerCameraManager.h"
+#include "CollisionQueryParams.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"      // GEngine->GetSmallFont
 #include "Engine/Font.h"
+#include "Engine/HitResult.h"
+#include "Engine/World.h"
 #include "EngineUtils.h"        // TActorIterator
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Math/UnrealMathUtility.h"
 
+#include "../Combat/DungeonEnemy.h"
 #include "../Combat/EncounterConfig.h"
 #include "../Combat/FloorManager.h"
 #include "../Combat/HealthComponent.h"
@@ -27,6 +32,27 @@ static TAutoConsoleVariable<float> CVarReadoutScale(
 	TEXT("M7A.1 readability HUD text scale multiplier (clamped 0.5..4.0; default 1.0)."),
 	ECVF_Default);
 
+// --- M7A.2 per-enemy readout (archetype nameplates + live HP bars) ---
+static TAutoConsoleVariable<int32> CVarShowEnemyReadout(
+	TEXT("ui.ShowEnemyReadout"), 1,
+	TEXT("M7A.2 per-enemy readability: 1 = draw archetype nameplates + HP bars over nearby live enemies, 0 = M7A.1 panels only. ui.ShowReadout=0 still hides everything."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarEnemyReadoutMaxDistance(
+	TEXT("ui.EnemyReadoutMaxDistance"), 2000.0f,
+	TEXT("M7A.2 enemy readout: max camera-to-enemy distance (uu) for a label (clamped 200..10000). Default 2000 exceeds LeashRange 1400, so anything that can chase you is labeled."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarEnemyReadoutMaxCount(
+	TEXT("ui.EnemyReadoutMaxCount"), 8,
+	TEXT("M7A.2 enemy readout: max labels drawn per frame (clamped 0..36). The occlusion trace budget is 2x this value (bounded refill)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarEnemyReadoutScale(
+	TEXT("ui.EnemyReadoutScale"), 1.0f,
+	TEXT("M7A.2 enemy readout text/bar scale multiplier (clamped 0.5..4.0; default 1.0)."),
+	ECVF_Default);
+
 namespace
 {
 	struct FHudLine
@@ -40,6 +66,12 @@ namespace
 	const FLinearColor kAccent(1.00f, 0.84f, 0.20f, 1.0f);   // yellow: reward / attention
 	const FLinearColor kDim   (0.60f, 0.60f, 0.60f, 1.0f);   // dim: unavailable / stale
 	const FLinearColor kPanelBg(0.0f, 0.0f, 0.0f, 0.55f);    // translucent black backing
+
+	// M7A.2 HP bar palette. Screen-space UI colors only - this is NOT the M7B world-material
+	// archetype tint; BodyMID/kEnemyBaseColor/hit-flash are untouched by contract.
+	const FLinearColor kHpGood (0.25f, 0.85f, 0.25f, 1.0f);  // fill > 50% HP
+	const FLinearColor kHpBad  (0.90f, 0.15f, 0.15f, 1.0f);  // fill < 25% HP (25..50% reuses kAccent)
+	const FLinearColor kBarBack(0.0f, 0.0f, 0.0f, 0.70f);    // HP bar backing strip
 
 	// Located exactly as the forensic verbs locate it (DungeonEvidence.cpp FindSpawner): the first
 	// ADungeonSpawner in the world. Guarantees the HUD reads the SAME instance Dungeon.RoomRoles /
@@ -95,6 +127,14 @@ namespace
 			OutLineH = FMath::Max(OutLineH, H);
 		}
 	}
+
+	// M7A.2: one enemy that survived the cheap (trace-free) filters, awaiting the
+	// distance-ordered bounded-refill occlusion pass.
+	struct FEnemyReadoutCandidate
+	{
+		ADungeonEnemy* Enemy = nullptr;
+		float DistSq = 0.0f;
+	};
 
 	// Draw a translucent backing box then the colored lines. Returns the total panel width drawn.
 	float DrawPanel(AHUD* Hud, UFont* Font, float OriginX, float OriginY,
@@ -252,4 +292,143 @@ void AUegameHUD::DrawHUD()
 	const float RightPanelW = RightContentW + 2.0f * (8.0f * Scale);
 	const float Rx = FMath::Max(24.0f, Canvas->SizeX - 24.0f - RightPanelW);
 	DrawPanel(this, Font, Rx, 24.0f, Right, Scale);
+
+	// ---------------- M7A.2: per-enemy readout (nameplates + HP bars) ----------------
+	// Same truthfulness contract as the panels: every value below is read live off the
+	// actor (numeric archetype id) and its UHealthComponent - nothing is cached, inferred
+	// from position/stats, or written back. Budgets (floor 3 spawns at most 36 enemies):
+	// <=36 iterator steps, <=MaxCount*2 occlusion traces, <=MaxCount labels, zero UObject
+	// creation, per frame.
+	if (CVarShowEnemyReadout.GetValueOnGameThread() == 0 || !World || !PC || !PC->PlayerCameraManager)
+	{
+		return;
+	}
+	const int32 MaxCount = FMath::Clamp(CVarEnemyReadoutMaxCount.GetValueOnGameThread(), 0, 36);
+	if (MaxCount == 0)
+	{
+		return;
+	}
+	const float EScale  = FMath::Clamp(CVarEnemyReadoutScale.GetValueOnGameThread(), 0.5f, 4.0f);
+	const float MaxDist = FMath::Clamp(CVarEnemyReadoutMaxDistance.GetValueOnGameThread(), 200.0f, 10000.0f);
+
+	const FVector CamLoc = PC->PlayerCameraManager->GetCameraLocation();
+	const FVector CamFwd = PC->PlayerCameraManager->GetCameraRotation().Vector();
+
+	// Cheap trace-free filters: valid, alive, in range, in front of the camera.
+	TArray<FEnemyReadoutCandidate> Candidates;
+	Candidates.Reserve(36);
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* E = *It;
+		if (!IsValid(E) || E->IsActorBeingDestroyed())
+		{
+			continue;
+		}
+		const UHealthComponent* HC = E->GetHealthComponent();
+		if (!HC || HC->IsDead())
+		{
+			continue;
+		}
+		const FVector ToEnemy = E->GetActorLocation() - CamLoc;
+		const float DistSq = ToEnemy.SizeSquared();
+		if (DistSq > MaxDist * MaxDist || FVector::DotProduct(ToEnemy, CamFwd) <= 0.0f)
+		{
+			continue;
+		}
+		Candidates.Add({ E, DistSq });
+	}
+
+	// Nearest first; UniqueID (constant per actor lifetime) is a presentation-only
+	// tiebreak so equidistant enemies never swap label slots between frames.
+	Candidates.Sort([](const FEnemyReadoutCandidate& A, const FEnemyReadoutCandidate& B)
+	{
+		return (A.DistSq != B.DistSq) ? A.DistSq < B.DistSq
+		                              : A.Enemy->GetUniqueID() < B.Enemy->GetUniqueID();
+	});
+
+	// Bounded refill (owner ruling): walk candidates nearest-first, skip occluded ones and
+	// keep refilling from farther candidates, until MaxCount labels are drawn or the trace
+	// budget (MaxCount*2) is spent. Never "nearest 8 are all behind walls so nothing draws",
+	// yet still a hard per-frame trace ceiling.
+	int32 TraceBudget = FMath::Min(Candidates.Num(), MaxCount * 2);
+	int32 Drawn = 0;
+	for (const FEnemyReadoutCandidate& C : Candidates)
+	{
+		if (Drawn >= MaxCount || TraceBudget <= 0)
+		{
+			break;
+		}
+
+		// Label anchor from the combined actor bounds (bOnlyCollidingComponents=false: the
+		// BodyMesh is NoCollision and must count). Tracks every archetype's real top - the
+		// x1.4 Brute mesh rises above the constant capsule; a hardcoded capsule-top Z would
+		// clip it (mesh top = 88*(2S-1) vs capsule top = 88).
+		FVector Origin, Extent;
+		C.Enemy->GetActorBounds(/*bOnlyCollidingComponents=*/false, Origin, Extent);
+		const FVector Anchor(Origin.X, Origin.Y, Origin.Z + Extent.Z);
+
+		// Project through the HUD's own canvas scene view (same projection the frame renders
+		// with, so resolution/aspect/DPI agree by construction). bClampToZeroPlane=false keeps
+		// Z sign-meaningful: Z<=0 = behind the camera (second line of defense after the dot
+		// product above). Off-screen anchors are culled without spending a trace.
+		const FVector Proj = Project(Anchor, /*bClampToZeroPlane=*/false);
+		if (Proj.Z <= 0.0f ||
+			Proj.X < 0.0f || Proj.X > Canvas->SizeX ||
+			Proj.Y < 0.0f || Proj.Y > Canvas->SizeY)
+		{
+			continue;
+		}
+
+		// Occlusion: camera->anchor against WorldStatic objects only - the same discipline as
+		// ADungeonEnemy::ComputeLOSTo (dungeon walls occlude; pawns never block a label).
+		--TraceBudget;
+		FHitResult Hit;
+		FCollisionQueryParams TraceParams(FName(TEXT("EnemyReadout")), /*bTraceComplex=*/false);
+		if (World->LineTraceSingleByObjectType(
+				Hit, CamLoc, Anchor, FCollisionObjectQueryParams(ECC_WorldStatic), TraceParams))
+		{
+			continue;   // behind a wall: refill from the next candidate
+		}
+
+		const UHealthComponent* HC = C.Enemy->GetHealthComponent();   // re-fetch: cheap, and no stale pointer risk
+		if (!HC)
+		{
+			continue;
+		}
+
+		// Nameplate text: "<Grunt|Runner|Brute|Enemy> cur/max". Unassigned enemies (no M6
+		// assignment: static spawners, unavailable tables) read dim + neutral - never "Grunt".
+		const FString Label = FString::Printf(TEXT("%s %.0f/%.0f"),
+			C.Enemy->GetArchetypeDisplayName(), HC->GetHP(), HC->GetMaxHP());
+		float TextW = 0.0f, TextH = 0.0f;
+		GetTextSize(Label, TextW, TextH, Font, EScale);
+
+		const float BarW  = 56.0f * EScale;
+		const float BarH  = 6.0f  * EScale;
+		const float PadX  = 3.0f  * EScale;
+		const float PadY  = 2.0f  * EScale;
+		const float Gap   = 2.0f  * EScale;    // text-to-bar gap
+		const float LiftPx = 14.0f * EScale;   // screen-space gap above the head (constant on screen, not world-scaled)
+
+		const float BlockW = FMath::Max(TextW, BarW) + 2.0f * PadX;
+		const float BlockH = TextH + Gap + BarH + 2.0f * PadY;
+		const float X = static_cast<float>(Proj.X) - 0.5f * BlockW;
+		const float Y = static_cast<float>(Proj.Y) - LiftPx - BlockH;
+
+		DrawRect(kPanelBg, X, Y, BlockW, BlockH);
+		DrawText(Label, C.Enemy->HasArchetypeAssignment() ? kBody : kDim,
+			X + 0.5f * (BlockW - TextW), Y + PadY, Font, EScale, /*bScalePosition=*/false);
+
+		// HP bar: fixed screen-space size, live ratio, UI-space color by remaining fraction.
+		const float Ratio = FMath::Clamp(HC->GetHP() / FMath::Max(HC->GetMaxHP(), 1.0f), 0.0f, 1.0f);
+		const FLinearColor Fill = (Ratio > 0.5f) ? kHpGood : (Ratio > 0.25f ? kAccent : kHpBad);
+		const float BarX = static_cast<float>(Proj.X) - 0.5f * BarW;
+		const float BarY = Y + PadY + TextH + Gap;
+		DrawRect(kBarBack, BarX, BarY, BarW, BarH);
+		if (Ratio > 0.0f)
+		{
+			DrawRect(Fill, BarX, BarY, BarW * Ratio, BarH);
+		}
+		++Drawn;
+	}
 }
