@@ -48,6 +48,24 @@ public:
 	int32 GetResolvedMaxHP() const { return ResolvedMaxHP; }
 	int32 GetResolvedMoveSpeed() const { return ResolvedMoveSpeed; }
 
+	// --- M7A.1 truthful-HUD read surface (additive, read-only) ---
+	// The HUD overlay must show the SAME state Dungeon.LoadoutStatus logs, so it reads these exact
+	// members rather than recomputing anything. No m5:: type crosses the reflected header (ints/arrays
+	// only), matching this file's core-isolation discipline. These getters have no side effects and do
+	// not change resolve/offer/reset behaviour.
+	/** The run's accumulated affix picks (ids), in pick order. Same array LogStatus prints as chosen=[]. */
+	const TArray<int32>& GetChosenAffixIds() const { return ChosenAffixIds; }
+	/** The ids currently on offer (empty unless a reward is pending). Same array LogStatus prints as offer=[]. */
+	const TArray<int32>& GetCurrentOfferIds() const { return CurrentOfferIds; }
+	/** offer_index of the current/last offer (= FloorIndex-1). */
+	int32 GetOfferIndex() const { return OfferIndex; }
+	/** Floor the current/last offer was generated for. */
+	int32 GetFloorForOffer() const { return FloorForOffer; }
+	/** Human-readable label for an affix id using the SAME built-in pool + formatter the offer log uses
+	 *  (e.g. "Damage +20%%", "MaxHP +60"). Returns "?" for an id not in the pool. Truthful single source:
+	 *  it delegates to the same FindAffixById/DescribeAffix helpers that build the offer string. */
+	FString DescribeAffixById(int32 Id) const;
+
 	/** Forensic dump for Dungeon.LoadoutStatus (runSeed/floor/offerIndex/pending/offer/chosen/resolved/base). */
 	void LogStatus() const;
 
