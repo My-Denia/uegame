@@ -73,6 +73,21 @@ namespace
 	const FLinearColor kHpBad  (0.90f, 0.15f, 0.15f, 1.0f);  // fill < 25% HP (25..50% reuses kAccent)
 	const FLinearColor kBarBack(0.0f, 0.0f, 0.0f, 0.70f);    // HP bar backing strip
 
+	const TCHAR* RunStateName(m8authority::RunState State)
+	{
+		switch (State)
+		{
+		case m8authority::RunState::Playing: return TEXT("PLAYING");
+		case m8authority::RunState::Paused: return TEXT("PAUSED");
+		case m8authority::RunState::Won: return TEXT("WON");
+		case m8authority::RunState::Failed: return TEXT("FAILED");
+		case m8authority::RunState::Error: return TEXT("ERROR");
+		case m8authority::RunState::RestartPending: return TEXT("RESTARTING");
+		case m8authority::RunState::QuitPending: return TEXT("QUITTING");
+		}
+		return TEXT("UNKNOWN");
+	}
+
 	// Located exactly as the forensic verbs locate it (DungeonEvidence.cpp FindSpawner): the first
 	// ADungeonSpawner in the world. Guarantees the HUD reads the SAME instance Dungeon.RoomRoles /
 	// Dungeon.EnemyRoster read, so their outputs cannot diverge by source.
@@ -240,6 +255,11 @@ void AUegameHUD::DrawHUD()
 	{
 		Right.Add({ FString::Printf(TEXT("Floor %d    seed 0x%llx"),
 			FM->GetFloorIndex(), static_cast<unsigned long long>(FM->GetRunSeed())), kBody });
+		Right.Add({ FString::Printf(TEXT("State      %s"), RunStateName(FM->GetRunState())), kBody });
+		Right.Add({ FString::Printf(TEXT("Exit       objective %s  safe %s"),
+			FM->IsFloorObjectiveComplete() ? TEXT("READY") : TEXT("OPEN"),
+			FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO")),
+			FM->IsProgressionBlockedByExitSafety() ? kAccent : kDim });
 	}
 	else
 	{
@@ -292,6 +312,44 @@ void AUegameHUD::DrawHUD()
 	const float RightPanelW = RightContentW + 2.0f * (8.0f * Scale);
 	const float Rx = FMath::Max(24.0f, Canvas->SizeX - 24.0f - RightPanelW);
 	DrawPanel(this, Font, Rx, 24.0f, Right, Scale);
+
+	// ---------------- Center: onboarding plus authoritative pause/result flow ----------------
+	TArray<FHudLine> Center;
+	if (FM && FM->IsRunActive())
+	{
+		switch (FM->GetRunState())
+		{
+		case m8authority::RunState::Paused:
+			Center.Add({ TEXT("PAUSED"), kAccent });
+			Center.Add({ TEXT("Esc Resume    R Restart    Q Quit"), kBody });
+			break;
+		case m8authority::RunState::Won:
+			Center.Add({ TEXT("RUN WON"), FLinearColor(0.35f, 1.0f, 0.45f, 1.0f) });
+			Center.Add({ TEXT("R Play Again    Q Quit"), kBody });
+			break;
+		case m8authority::RunState::Failed:
+			Center.Add({ TEXT("RUN FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+			Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+			break;
+		case m8authority::RunState::Error:
+			Center.Add({ TEXT("FINAL CHALLENGE ERROR"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+			Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+			break;
+		case m8authority::RunState::Playing:
+			Center.Add({ TEXT("WASD Move  Mouse Look  F Attack  Esc Pause  Q Quit"), kDim });
+			break;
+		default:
+			break;
+		}
+	}
+	if (Center.Num() > 0)
+	{
+		float CenterW = 0.0f, CenterLineH = 0.0f;
+		MeasurePanel(this, Font, Center, Scale, CenterW, CenterLineH);
+		const float CenterPanelW = CenterW + 2.0f * (8.0f * Scale);
+		DrawPanel(this, Font, (Canvas->SizeX - CenterPanelW) * 0.5f,
+			Canvas->SizeY - 72.0f * Scale, Center, Scale);
+	}
 
 	// ---------------- M7A.2: per-enemy readout (nameplates + HP bars) ----------------
 	// Same truthfulness contract as the panels: every value below is read live off the

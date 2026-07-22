@@ -16,6 +16,15 @@
 
 class UInstancedStaticMeshComponent;
 
+struct FFloorExitNeutralizationResult
+{
+	int32 Eligible = 0;
+	int32 Neutralized = 0;
+	int32 DestroyQueued = 0;
+	int32 RemainingActive = 0;
+	bool bSuccess = false;
+};
+
 UCLASS()
 class UEGAME_API ADungeonSpawner : public AActor
 {
@@ -93,6 +102,13 @@ public:
 
 	/** Enemy death callback; logs [RoomClear] when a room's alive count reaches zero. */
 	void NotifyEnemyDead(int32 InRoomIndex);
+
+	/** Atomically make every live enemy owned by this spawner harmless before progression. */
+	FFloorExitNeutralizationResult DeactivateRemainingEnemiesForExit(int32 InFloorIndex);
+#if !UE_BUILD_SHIPPING
+	/** Negative-test seam. Compiled out of Shipping with the evidence verbs that call it. */
+	void SetForceExitWithdrawalFailureForTests(bool bForce) { bForceExitWithdrawalFailureForTests = bForce; }
+#endif
 
 	int32 GetRoomCount() const { return RoomCentersWorld.Num(); }
 	FVector GetRoomCenterWorld(int32 InRoomIndex) const
@@ -199,4 +215,7 @@ private:
 	TArray<int32> CachedRoomRoles;
 	TArray<FIntVector> CachedRoomTypeCounts;
 	FIntVector CachedTypeTally = FIntVector::ZeroValue;
+#if !UE_BUILD_SHIPPING
+	bool bForceExitWithdrawalFailureForTests = false;
+#endif
 };

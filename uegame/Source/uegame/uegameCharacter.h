@@ -111,6 +111,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	virtual void DoChooseLoadout(int32 Index);
 
+	/** Player-facing run controls. These remain active while the world is paused. */
+	UFUNCTION(BlueprintCallable, Category="Run")
+	virtual void DoTogglePause();
+	UFUNCTION(BlueprintCallable, Category="Run")
+	virtual void DoManualRestart();
+	UFUNCTION(BlueprintCallable, Category="Run")
+	virtual void DoQuit();
+
 protected:
 
 	/** Init HP from the combat DataTable row; bind death handling. */

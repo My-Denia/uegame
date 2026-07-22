@@ -3,13 +3,14 @@
 // (mechanism (a), GATE-1 decision: world + nav system stay alive across floors, so
 // player HP carries over simply because the pawn is never destroyed).
 // Win: descending past MaxFloors (DataTable) -> [RunWon]. Lose: player death during
-// a run -> [RunFailed]. Either restarts from floor 1 with a fresh runSeed chained
-// deterministically via m2::nextRunSeed (no unseeded RNG, contract F).
+// a run -> [RunFailed]. Both remain visible until the player explicitly restarts or quits.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+
+#include "m8_runtime_authority.hpp"
 
 #include "FloorManager.generated.h"
 
@@ -31,6 +32,10 @@ public:
 	bool IsRunActive() const { return bRunActive; }
 	uint64 GetRunSeed() const { return RunSeed; }
 	int32 GetFloorIndex() const { return FloorIndex; }
+	m8authority::RunState GetRunState() const { return RuntimeLifecycle.state; }
+	bool IsFloorObjectiveComplete() const { return bFloorObjectiveComplete; }
+	bool AreFloorExitThreatsWithdrawn() const { return bFloorExitThreatsWithdrawn; }
+	bool IsProgressionBlockedByExitSafety() const { return bExitSafetyBlocked; }
 
 	/** The single first-run seed authority (contract F, amended: seeded everywhere except this
 	 *  one run-boundary point). Priority: explicit override (Dungeon.SetRunSeed) > bUseFixedFirstSeed
@@ -59,15 +64,22 @@ public:
 	 *  stairs so a player already on the pad descends. Driven by Dungeon.ChooseLoadout and keys 1/2/3. */
 	void TryChooseLoadout(int32 Index);
 
-	/** Player death during a run: [RunFailed], chain a fresh seed, restart floor 1. */
+	/** Player death during a run: enter a visible [RunFailed] result state. */
 	void NotifyRunFailed();
 
+	/** Enter a visible, recoverable finale initialization error. Never auto-restarts. */
+	void NotifyFinaleInitFailed();
+
+	/** Ordinary player controls. Escape toggles pause; R restarts from pause/result/error; Q exits. */
+	void TogglePause();
+	void RequestManualRestart();
+	void RequestQuit();
+
 private:
-	/** Transitions are deferred to next tick (the trigger may sit on the call stack of an
-	 *  actor the transition destroys). The pending kind is re-read at fire time: a death
-	 *  arriving inside the window upgrades a queued Descend to Fail - the run must never
-	 *  continue onto the next floor with a dead pawn. The reverse never happens. */
-	enum class EPendingTransition : uint8 { None, Descend, Fail };
+	/** Descend is deferred to next tick because its trigger may sit on the call stack of an
+	 *  actor the transition destroys. A death in that window clears the pending descend and
+	 *  enters the stable Failed result instead. */
+	enum class EPendingTransition : uint8 { None, Descend };
 
 	void StartFloor(int32 NewFloorIndex);
 	void RestartRun(const TCHAR* Reason);
@@ -84,6 +96,8 @@ private:
 	void ResetLoadoutForNewRun() const;
 	/** M5: re-attempt descend on every stairs pad after a reward pick (no-op unless the pawn is on a pad). */
 	void RepokeStairsForDescend() const;
+	void ApplyWorldPause(bool bPaused) const;
+	void EnterTerminalState(m8authority::RunEvent Event, const TCHAR* LogAnchor);
 
 	FDelegateHandle ActorsInitializedHandle;
 
@@ -91,6 +105,10 @@ private:
 	int32 FloorIndex = 0;
 	bool bRunActive = false;
 	EPendingTransition PendingTransition = EPendingTransition::None;
+	m8authority::Lifecycle RuntimeLifecycle;
+	bool bFloorObjectiveComplete = false;
+	bool bFloorExitThreatsWithdrawn = false;
+	bool bExitSafetyBlocked = false;
 
 	/** Set by Dungeon.SetRunSeed: overrides entropy for the next first-run seed. */
 	TOptional<uint64> ExplicitFirstSeed;

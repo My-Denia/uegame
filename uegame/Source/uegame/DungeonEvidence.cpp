@@ -458,13 +458,18 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		}
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("[FloorStatus] runActive=%s floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d |%s"),
+		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d objective=%s exitSafe=%s exitBlocked=%s |%s"),
 		(FM && FM->IsRunActive()) ? TEXT("yes") : TEXT("no"),
+		FM ? static_cast<int32>(FM->GetRunState()) : -1,
 		FM ? FM->GetFloorIndex() : -1,
 		static_cast<unsigned long long>(FM ? FM->GetRunSeed() : 0),
 		static_cast<unsigned long long>(Spawner ? Spawner->GetEffectiveSeed64() : 0),
 		HP ? HP->GetHP() : -1.0f, HP ? HP->GetMaxHP() : -1.0f,
-		Alive, Total, *Rooms);
+		Alive, Total,
+		(FM && FM->IsFloorObjectiveComplete()) ? TEXT("true") : TEXT("false"),
+		(FM && FM->AreFloorExitThreatsWithdrawn()) ? TEXT("true") : TEXT("false"),
+		(FM && FM->IsProgressionBlockedByExitSafety()) ? TEXT("true") : TEXT("false"),
+		*Rooms);
 }
 
 void DungeonSetHPCmd(const TArray<FString>& Args, UWorld* World)
@@ -931,6 +936,67 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonEnemyRosterCmd(
 	TEXT("Dungeon.EnemyRoster"),
 	TEXT("Log the current floor's archetype roster: tally, per-room roster, resolved stats, enemyTypeHash + preserved m2 anchors"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonEnemyRosterCmd));
+
+// --- Phase 1A runtime-authority negative seams ---
+// These setters/triggers exist only inside the file-wide !UE_BUILD_SHIPPING gate. They
+// force otherwise rare failure branches; ordinary recovery is still exercised with R/Q.
+void DungeonExitWithdrawalFailureCmd(const TArray<FString>& Args, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	if (!Spawner || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ExitWithdrawalFailure <0|1>"));
+		return;
+	}
+	const bool bForce = FCString::Atoi(*Args[0]) != 0;
+	Spawner->SetForceExitWithdrawalFailureForTests(bForce);
+	UE_LOG(LogTemp, Display, TEXT("[RuntimeAuthorityTest] exitWithdrawalFailure=%s"),
+		bForce ? TEXT("true") : TEXT("false"));
+}
+
+void DungeonNotifyFloorClearedCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->NotifyFloorCleared();
+	}
+}
+
+void DungeonTryDescendCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->RequestDescend(/*bForce=*/false);
+	}
+}
+
+void DungeonFinaleInitFailCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->NotifyFinaleInitFailed();
+	}
+}
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonExitWithdrawalFailureCmd(
+	TEXT("Dungeon.ExitWithdrawalFailure"),
+	TEXT("Development-only negative seam: force floor-exit withdrawal failure (0|1)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonExitWithdrawalFailureCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonNotifyFloorClearedCmd(
+	TEXT("Dungeon.NotifyFloorCleared"),
+	TEXT("Development-only trigger for the ordinary atomic floor-completion path"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonNotifyFloorClearedCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonTryDescendCmd(
+	TEXT("Dungeon.TryDescend"),
+	TEXT("Development-only trigger for the ordinary non-forced stairs request path"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonTryDescendCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleInitFailCmd(
+	TEXT("Dungeon.FinaleInitFail"),
+	TEXT("Development-only trigger for the explicit non-restarting finale error state"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleInitFailCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

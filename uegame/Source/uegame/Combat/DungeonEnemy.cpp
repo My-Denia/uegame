@@ -278,6 +278,41 @@ void ADungeonEnemy::ClearFlash()
 	}
 }
 
+bool ADungeonEnemy::IsActiveThreat() const
+{
+	return !bNeutralizedForFloorExit
+		&& !IsActorBeingDestroyed()
+		&& Health
+		&& !Health->IsDead();
+}
+
+bool ADungeonEnemy::NeutralizeForFloorExit(bool& bOutDestroyQueued)
+{
+	bOutDestroyQueued = false;
+	if (!IsActiveThreat())
+	{
+		return false;
+	}
+
+	// Destroy is deferred. Remove every gameplay effect synchronously so a completed
+	// floor cannot receive one final movement/contact-damage tick on the exit pad.
+	bNeutralizedForFloorExit = true;
+	ContactDamage = 0.0f;
+	bChasing = false;
+	SetCanBeDamaged(false);
+	GetWorldTimerManager().ClearTimer(PursueTimer);
+	GetWorldTimerManager().ClearTimer(FlashTimer);
+	if (AAIController* AI = Cast<AAIController>(GetController()))
+	{
+		AI->StopMovement();
+	}
+	SetActorEnableCollision(false);
+	SetActorTickEnabled(false);
+	SetActorHiddenInGame(true);
+	bOutDestroyQueued = Destroy();
+	return true;
+}
+
 void ADungeonEnemy::HandleDeath(AActor* /*DeadActor*/)
 {
 	UE_LOG(LogTemp, Display, TEXT("[Enemy] died room=%d"), RoomIndex);

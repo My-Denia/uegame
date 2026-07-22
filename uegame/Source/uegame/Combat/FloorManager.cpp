@@ -14,6 +14,8 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformTime.h"
+#include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/DateTime.h"
 #include "TimerManager.h"
@@ -178,6 +180,8 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 
 	RunSeed = InRunSeed;
 	bRunActive = true;
+	RuntimeLifecycle.state = m8authority::RunState::Playing;
+	ApplyWorldPause(false);
 	PendingTransition = EPendingTransition::None;   // a manual (re)start cancels queued intent
 	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d"),
 		static_cast<unsigned long long>(RunSeed), FUegameCombatConfig::Get().MaxFloors);
@@ -196,6 +200,9 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 	FloorIndex = NewFloorIndex;
+	bFloorObjectiveComplete = false;
+	bFloorExitThreatsWithdrawn = false;
+	bExitSafetyBlocked = false;
 
 	const uint64 FloorSeed = m2::deriveFloorSeed(RunSeed, FloorIndex);
 	const double Mult = m2::floorMultiplier(FloorIndex, Cfg.PerFloorScaling);
@@ -242,25 +249,37 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 		return;   // duplicate trigger, or the player already died this tick
 	}
 
-	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 	ADungeonSpawner* Spawner = FindSpawner();
 
-	if (!bForce && Cfg.bRequireFloorClearToDescend && Spawner && !Spawner->AreAllRoomsCleared())
+	// A prior withdrawal failure is recoverable. Once the ordinary all-clear condition is
+	// true, retry the same atomic completion path before deciding whether the exit is safe.
+	if (!bForce && !bFloorObjectiveComplete && Spawner
+		&& (bExitSafetyBlocked || Spawner->AreAllRoomsCleared()))
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Stairs] descend BLOCKED by clear-gate policy (enemies alive)"));
-		return;
+		NotifyFloorCleared();
 	}
 
-	// M5 reward gate: a floor whose reward has not been taken must not be descended past (the reward is
-	// EARNED on clear - descending would skip it). Independent of bRequireFloorClearToDescend; bForce
-	// (Dungeon.Descend / DescendThenDie) still bypasses. Checked synchronously here so no descend is ever
-	// queued while a reward is owed.
+	// The pure authority sees the exact runtime facts. Reward-pending remains part of the same
+	// decision, so no caller can accidentally gate objective safety and reward in different orders.
 	if (!bForce)
 	{
-		if (const ULoadoutComponent* LC = FindPlayerLoadout(); LC && LC->IsRewardPending())
+		const ULoadoutComponent* LC = FindPlayerLoadout();
+		m8authority::ExitInput Exit;
+		Exit.objective_progress = bFloorObjectiveComplete ? 1 : 0;
+		Exit.objective_threshold = 1;
+		Exit.withdrawal = bFloorExitThreatsWithdrawn
+			? m8authority::WithdrawalState::Succeeded
+			: (bExitSafetyBlocked ? m8authority::WithdrawalState::Failed
+				: m8authority::WithdrawalState::Pending);
+		Exit.reward = LC && LC->IsRewardPending()
+			? m8authority::RewardState::Pending
+			: m8authority::RewardState::Resolved;
+		const m8authority::ExitDecision Decision = m8authority::decide_exit(Exit);
+		if (!Decision.descend_allowed)
 		{
-			UE_LOG(LogTemp, Display,
-				TEXT("[Stairs] descend BLOCKED by reward-pending (pick an affix: Dungeon.ChooseLoadout <0|1|2> or keys 1/2/3)"));
+			const TCHAR* Reason = !Decision.objective_complete
+				? TEXT("floor objective/exit safety") : TEXT("reward-pending (press 1/2/3)");
+			UE_LOG(LogTemp, Display, TEXT("[Stairs] descend BLOCKED by %s"), Reason);
 			return;
 		}
 	}
@@ -279,15 +298,19 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 
 void UUegameFloorManager::NotifyRunFailed()
 {
-	if (!bRunActive || PendingTransition == EPendingTransition::Fail)
+	if (!bRunActive
+		|| RuntimeLifecycle.state == m8authority::RunState::Failed
+		|| RuntimeLifecycle.state == m8authority::RunState::Won
+		|| RuntimeLifecycle.state == m8authority::RunState::Error)
 	{
-		return;   // no run, or this death is already being handled
+		return;
 	}
 
 	// A death inside a queued descend's one-tick window upgrades that transition: the run
 	// must fail, never continue onto the next floor with a dead pawn. StartFloor() does not
 	// revive, so letting the descend win would strand the run at HP=0 with OnDeath spent.
 	const bool bUpgradedPendingDescend = (PendingTransition == EPendingTransition::Descend);
+	PendingTransition = EPendingTransition::None;
 
 	// Evidence (acceptance E): lose path.
 	UE_LOG(LogTemp, Display, TEXT("[RunFailed] floor=%d runSeed=%llu%s"),
@@ -296,23 +319,9 @@ void UUegameFloorManager::NotifyRunFailed()
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Red,
-			FString::Printf(TEXT("RUN FAILED on floor %d. Restarting with a fresh seed..."), FloorIndex));
+			FString::Printf(TEXT("RUN FAILED on floor %d. Press R to restart or Q to quit."), FloorIndex));
 	}
-
-	if (bUpgradedPendingDescend)
-	{
-		PendingTransition = EPendingTransition::Fail;   // reuse the tick RequestDescend queued
-		return;
-	}
-
-	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-	if (!World)
-	{
-		return;
-	}
-	PendingTransition = EPendingTransition::Fail;
-	World->GetTimerManager().SetTimerForNextTick(
-		FTimerDelegate::CreateWeakLambda(this, [this]() { ExecutePendingTransition(); }));
+	EnterTerminalState(m8authority::RunEvent::Fail, TEXT("RunFailed"));
 }
 
 void UUegameFloorManager::ExecutePendingTransition()
@@ -321,12 +330,6 @@ void UUegameFloorManager::ExecutePendingTransition()
 	PendingTransition = EPendingTransition::None;
 	if (!bRunActive || Kind == EPendingTransition::None)
 	{
-		return;
-	}
-
-	if (Kind == EPendingTransition::Fail)
-	{
-		RestartRun(TEXT("failed"));
 		return;
 	}
 
@@ -341,9 +344,9 @@ void UUegameFloorManager::ExecutePendingTransition()
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Green,
-				FString::Printf(TEXT("RUN WON - %d floors! Restarting with a fresh seed..."), FloorIndex));
+				FString::Printf(TEXT("RUN WON - %d floors! Press R to play again or Q to quit."), FloorIndex));
 		}
-		RestartRun(TEXT("won"));
+		EnterTerminalState(m8authority::RunEvent::Win, TEXT("RunWon"));
 	}
 	else
 	{
@@ -363,7 +366,95 @@ void UUegameFloorManager::RestartRun(const TCHAR* Reason)
 	// HP (never leaves the new run at a prior run's boosted max, never refills-then-tops).
 	ResetLoadoutForNewRun();
 	HealPlayerFull();
+	m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::AckRestart);
 	StartFloor(1);
+}
+
+void UUegameFloorManager::ApplyWorldPause(bool bPaused) const
+{
+	if (UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr)
+	{
+		UGameplayStatics::SetGamePaused(World, bPaused);
+	}
+}
+
+void UUegameFloorManager::EnterTerminalState(m8authority::RunEvent Event, const TCHAR* LogAnchor)
+{
+	const m8authority::LifecycleDecision Decision = m8authority::apply_event(RuntimeLifecycle, Event);
+	if (!Decision.state_changed)
+	{
+		return;
+	}
+	ApplyWorldPause(true);
+	UE_LOG(LogTemp, Display, TEXT("[RunState] source=%s state=%d manualActionRequired=true"),
+		LogAnchor, static_cast<int32>(RuntimeLifecycle.state));
+}
+
+void UUegameFloorManager::NotifyFinaleInitFailed()
+{
+	if (!bRunActive || RuntimeLifecycle.state == m8authority::RunState::Error)
+	{
+		return;
+	}
+	PendingTransition = EPendingTransition::None;
+	UE_LOG(LogTemp, Error,
+		TEXT("[FinaleInitFailed] floor=%d runSeed=%llu action=manual-restart-or-quit"),
+		FloorIndex, static_cast<unsigned long long>(RunSeed));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 30.0f, FColor::Red,
+			TEXT("FINAL CHALLENGE COULD NOT START. Press R to restart or Q to quit."));
+	}
+	EnterTerminalState(m8authority::RunEvent::FinaleInitFail, TEXT("FinaleInitFailed"));
+}
+
+void UUegameFloorManager::TogglePause()
+{
+	if (!bRunActive)
+	{
+		return;
+	}
+	const m8authority::LifecycleDecision Decision =
+		m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::TogglePause);
+	if (!Decision.state_changed)
+	{
+		return;
+	}
+	const bool bPaused = RuntimeLifecycle.state == m8authority::RunState::Paused;
+	ApplyWorldPause(bPaused);
+	UE_LOG(LogTemp, Display, TEXT("[RunPause] paused=%s"), bPaused ? TEXT("true") : TEXT("false"));
+}
+
+void UUegameFloorManager::RequestManualRestart()
+{
+	if (!bRunActive)
+	{
+		return;
+	}
+	const m8authority::LifecycleDecision Decision =
+		m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::Restart);
+	if (!Decision.restart_requested)
+	{
+		return;
+	}
+	PendingTransition = EPendingTransition::None;
+	ApplyWorldPause(false);
+	RestartRun(TEXT("manual"));
+}
+
+void UUegameFloorManager::RequestQuit()
+{
+	const m8authority::LifecycleDecision Decision =
+		m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::Quit);
+	if (!Decision.quit_requested)
+	{
+		return;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[RunQuitRequested] floor=%d runSeed=%llu"),
+		FloorIndex, static_cast<unsigned long long>(RunSeed));
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	UKismetSystemLibrary::QuitGame(World, PC, EQuitPreference::Quit, false);
 }
 
 ULoadoutComponent* UUegameFloorManager::FindPlayerLoadout() const
@@ -400,10 +491,49 @@ void UUegameFloorManager::RepokeStairsForDescend() const
 
 void UUegameFloorManager::NotifyFloorCleared()
 {
-	if (!bRunActive)
+	if (!bRunActive || bFloorObjectiveComplete)
 	{
 		return;
 	}
+
+	ADungeonSpawner* Spawner = FindSpawner();
+	FFloorExitNeutralizationResult Withdrawal;
+	if (Spawner)
+	{
+		Withdrawal = Spawner->DeactivateRemainingEnemiesForExit(FloorIndex);
+	}
+
+	m8authority::ExitInput Exit;
+	Exit.objective_progress = 1;
+	Exit.objective_threshold = 1;
+	Exit.withdrawal = Withdrawal.bSuccess
+		? m8authority::WithdrawalState::Succeeded
+		: m8authority::WithdrawalState::Failed;
+	Exit.reward = m8authority::RewardState::Unavailable;
+	const m8authority::ExitDecision Decision = m8authority::decide_exit(Exit);
+	bExitSafetyBlocked = Decision.blocked_visible;
+	if (!Decision.objective_complete)
+	{
+		bFloorObjectiveComplete = false;
+		bFloorExitThreatsWithdrawn = false;
+		UE_LOG(LogTemp, Error,
+			TEXT("[FloorObjective] floor=%d complete=false exitSafe=false reward=false retry=stairs"),
+			FloorIndex);
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Red,
+				TEXT("EXIT NOT SAFE - threats could not withdraw. Try the stairs again."));
+		}
+		return;
+	}
+
+	// Commit the paired facts together only after neutralization is proven. Reward creation
+	// and stairs progression are downstream of this point and cannot observe a half-state.
+	bFloorExitThreatsWithdrawn = true;
+	bFloorObjectiveComplete = true;
+	bExitSafetyBlocked = false;
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorObjective] floor=%d complete=true exitSafe=true rewardEligible=true"), FloorIndex);
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 
 	// Final floor owes no reward: a pre-win offer would be useless (there is no next floor to spend it on),

@@ -39,6 +39,10 @@ public:
 	void ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, int32 InTypeId);
 
 	int32 GetRoomIndex() const { return RoomIndex; }
+	/** Read-only ownership used by the spawner's floor-exit safety transaction. */
+	ADungeonSpawner* GetOwningSpawner() const { return SpawnerRef.Get(); }
+	/** True only while this actor can still pursue or damage the player. */
+	bool IsActiveThreat() const;
 
 	// --- M7A.2 read-only identity/HP surface (consumed by the AUegameHUD enemy readout) ---
 	/** True only after ApplyArchetype ran (M6 assignment). The static-spawner /
@@ -66,6 +70,9 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	friend class ADungeonSpawner;
+	/** Stop damage, movement, collision and visibility synchronously, then queue destroy. */
+	bool NeutralizeForFloorExit(bool& bOutDestroyQueued);
 	void PursueTick();
 
 	UFUNCTION()
@@ -109,4 +116,5 @@ private:
 	float LeashRange = 1400.0f;
 
 	bool bLoggedFirstMove = false;
+	bool bNeutralizedForFloorExit = false;
 };

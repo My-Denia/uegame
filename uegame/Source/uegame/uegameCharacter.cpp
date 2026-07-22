@@ -94,6 +94,30 @@ void AuegameCharacter::DoChooseLoadout(int32 Index)
 	}
 }
 
+void AuegameCharacter::DoTogglePause()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->TogglePause();
+	}
+}
+
+void AuegameCharacter::DoManualRestart()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->RequestManualRestart();
+	}
+}
+
+void AuegameCharacter::DoQuit()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->RequestQuit();
+	}
+}
+
 void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageInstigator*/)
 {
 	// Brief red screen pulse via a camera fade (0.5 -> 0 alpha over 0.25s). No UMG asset; the
@@ -161,9 +185,19 @@ void AuegameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 		// M5 loadout choice: legacy number keys 1/2/3 pick offer option 0/1/2. Console verb
 		// Dungeon.ChooseLoadout is the mandated forensic interface; these are the playable path.
-		PlayerInputComponent->BindKey(EKeys::One,   IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey0);
-		PlayerInputComponent->BindKey(EKeys::Two,   IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey1);
-		PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey2);
+		PlayerInputComponent->BindKey(EKeys::One, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey0)
+			.bExecuteWhenPaused = true;
+		PlayerInputComponent->BindKey(EKeys::Two, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey1)
+			.bExecuteWhenPaused = true;
+		PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey2)
+			.bExecuteWhenPaused = true;
+
+		PlayerInputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AuegameCharacter::DoTogglePause)
+			.bExecuteWhenPaused = true;
+		PlayerInputComponent->BindKey(EKeys::R, IE_Pressed, this, &AuegameCharacter::DoManualRestart)
+			.bExecuteWhenPaused = true;
+		PlayerInputComponent->BindKey(EKeys::Q, IE_Pressed, this, &AuegameCharacter::DoQuit)
+			.bExecuteWhenPaused = true;
 	}
 	else
 	{

@@ -368,6 +368,73 @@ void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
 	}
 }
 
+FFloorExitNeutralizationResult ADungeonSpawner::DeactivateRemainingEnemiesForExit(int32 InFloorIndex)
+{
+	FFloorExitNeutralizationResult Result;
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[FloorExitSafe] floor=%d rejected=no-game-world"), InFloorIndex);
+		return Result;
+	}
+
+	bool bForcePartialFailure = false;
+#if !UE_BUILD_SHIPPING
+	bForcePartialFailure = bForceExitWithdrawalFailureForTests;
+#endif
+	int32 TestNeutralizeBudget = bForcePartialFailure ? 1 : MAX_int32;
+
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Enemy = *It;
+		if (!IsValid(Enemy) || Enemy->GetWorld() != World
+			|| Enemy->GetOwningSpawner() != this || !Enemy->IsActiveThreat())
+		{
+			continue;
+		}
+
+		++Result.Eligible;
+		if (TestNeutralizeBudget <= 0)
+		{
+			continue;
+		}
+		bool bDestroyQueued = false;
+		if (Enemy->NeutralizeForFloorExit(bDestroyQueued))
+		{
+			++Result.Neutralized;
+			Result.DestroyQueued += bDestroyQueued ? 1 : 0;
+			--TestNeutralizeBudget;
+		}
+	}
+
+	// Destroy is deferred; the synchronous active-threat state is the safety authority.
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		const ADungeonEnemy* Enemy = *It;
+		if (IsValid(Enemy) && Enemy->GetWorld() == World
+			&& Enemy->GetOwningSpawner() == this && Enemy->IsActiveThreat())
+		{
+			++Result.RemainingActive;
+		}
+	}
+
+	Result.bSuccess = Result.Eligible == Result.Neutralized && Result.RemainingActive == 0;
+	if (Result.bSuccess)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[FloorExitSafe] floor=%d eligible=%d neutralized=%d destroyQueued=%d remainingActive=%d success=true"),
+			InFloorIndex, Result.Eligible, Result.Neutralized, Result.DestroyQueued, Result.RemainingActive);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitSafe] floor=%d eligible=%d neutralized=%d destroyQueued=%d remainingActive=%d success=false forcedPartial=%s"),
+			InFloorIndex, Result.Eligible, Result.Neutralized, Result.DestroyQueued, Result.RemainingActive,
+			bForcePartialFailure ? TEXT("true") : TEXT("false"));
+	}
+	return Result;
+}
+
 void ADungeonSpawner::Build()
 {
 	if (!FloorISM || !WallISM || !CorridorISM || !DoorISM)

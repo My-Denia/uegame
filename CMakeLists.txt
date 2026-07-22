@@ -115,3 +115,10 @@ add_test(NAME m8_room_flow COMMAND m8_room_flow_test)
 add_executable(m8_finale_test test_m8_finale.cpp m8_finale.cpp)
 target_sources(m8_finale_test PRIVATE m8_finale.hpp)
 add_test(NAME m8_finale COMMAND m8_finale_test)
+
+# --- M8 runtime authority: engine-independent exit/reward and lifecycle policy ---
+add_executable(m8_runtime_authority_test
+               test_m8_runtime_authority.cpp
+               m8_runtime_authority.cpp)
+target_sources(m8_runtime_authority_test PRIVATE m8_runtime_authority.hpp)
+add_test(NAME m8_runtime_authority COMMAND m8_runtime_authority_test)

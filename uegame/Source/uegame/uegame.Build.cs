@@ -7,6 +7,10 @@ public class uegame : ModuleRules
 	public uegame(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		// Several independent loader translation units intentionally use private
+		// anonymous-namespace names such as LoadOnce/GLoaded. Compile them separately
+		// so a clean Rebuild has the same semantics as the normal adaptive build.
+		bUseUnity = false;
 
 		PublicDependencyModuleNames.AddRange(new string[] {
 			"Core",
