@@ -20,14 +20,18 @@
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
 #include "Combat/LoadoutComponent.h"
+#include "UI/UegameHUD.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/GameModeBase.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
+#include "InputKeyEventArgs.h"
+#include "InputCoreTypes.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
 
@@ -43,6 +47,21 @@ namespace
 // out of Shipping (the M2-era Dungeon.Spawn/Dungeon.WalkFar included), so no forensic
 // surface ships. Development/PIE builds keep the gate true, so evidence runs are unaffected.
 #if !UE_BUILD_SHIPPING
+
+uint64 GObjectiveRouteDriveGeneration = 0;
+TWeakObjectPtr<APlayerController> GObjectiveRouteDriveController;
+
+void ReleaseObjectiveRouteDriveInput(const TCHAR* Reason, float TravelCm, double ElapsedSeconds)
+{
+	if (APlayerController* PC = GObjectiveRouteDriveController.Get())
+	{
+		PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::W, IE_Released, 0.0f));
+	}
+	GObjectiveRouteDriveController.Reset();
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRouteDrive] stop reason=%s travelCm=%.1f elapsed=%.2f input=W_RELEASED"),
+		Reason, TravelCm, ElapsedSeconds);
+}
 
 ADungeonSpawner* FindSpawner(UWorld* World)
 {
@@ -1096,6 +1115,186 @@ void DungeonContractFreshSpawnerFailureCmd(const TArray<FString>& Args, UWorld* 
 		bForce ? TEXT("true") : TEXT("false"));
 }
 
+void DungeonRouteFaultModeCmd(const TArray<FString>& Args, UWorld* World)
+{
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	AUegameHUD* HUD = PC ? Cast<AUegameHUD>(PC->GetHUD()) : nullptr;
+	if (!HUD || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.RouteFaultMode <0..6>"));
+		return;
+	}
+	HUD->SetObjectiveRouteFaultModeForTests(FMath::Clamp(FCString::Atoi(*Args[0]), 0, 6));
+}
+
+void DungeonRouteStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	AUegameHUD* HUD = PC ? Cast<AUegameHUD>(PC->GetHUD()) : nullptr;
+	if (HUD)
+	{
+		HUD->LogObjectiveRouteStatusForTests();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[ObjectiveRouteStatus] hud=false"));
+	}
+}
+
+void DungeonRouteDriveCmd(const TArray<FString>& Args, UWorld* World)
+{
+	++GObjectiveRouteDriveGeneration;
+	if (GObjectiveRouteDriveController.IsValid())
+	{
+		ReleaseObjectiveRouteDriveInput(TEXT("replaced"), 0.0f, 0.0);
+	}
+
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[ObjectiveRouteDrive] start=false reason=no-game-world"));
+		return;
+	}
+	if (Args.Num() > 0 && Args[0].Equals(TEXT("stop"), ESearchCase::IgnoreCase))
+	{
+		UE_LOG(LogTemp, Display, TEXT("[ObjectiveRouteDrive] stop reason=requested input=already-released"));
+		return;
+	}
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	AUegameHUD* HUD = PC ? Cast<AUegameHUD>(PC->GetHUD()) : nullptr;
+	if (!PC || !Pawn || !HUD)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[ObjectiveRouteDrive] start=false reason=missing-player-or-hud"));
+		return;
+	}
+	FVector InitialWaypoint;
+	if (!HUD->TryGetObjectiveRouteWaypointForTests(InitialWaypoint))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[ObjectiveRouteDrive] start=false reason=route-not-ready"));
+		HUD->LogObjectiveRouteStatusForTests();
+		return;
+	}
+
+	const float MaxSeconds = Args.Num() > 0
+		? FMath::Clamp(FCString::Atof(*Args[0]), 1.0f, 60.0f)
+		: 30.0f;
+	const uint64 DriveGeneration = GObjectiveRouteDriveGeneration;
+	const TWeakObjectPtr<UWorld> WeakWorld(World);
+	const FVector StartLocation = Pawn->GetActorLocation();
+	const double StartedAt = FPlatformTime::Seconds();
+	GObjectiveRouteDriveController = PC;
+	PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::W, IE_Pressed, 1.0f));
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRouteDrive] start=true maxSeconds=%.1f input=W_PRESSED steering=smooth"),
+		MaxSeconds);
+
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+		[DriveGeneration, WeakWorld, StartLocation, StartedAt, MaxSeconds,
+			LastWaypoint = InitialWaypoint, RouteUnavailableAt = -1.0](float DeltaSeconds) mutable
+		{
+			UWorld* CurrentWorld = WeakWorld.Get();
+			APlayerController* CurrentPC = CurrentWorld ? CurrentWorld->GetFirstPlayerController() : nullptr;
+			APawn* CurrentPawn = CurrentPC ? CurrentPC->GetPawn() : nullptr;
+			AUegameHUD* CurrentHUD = CurrentPC ? Cast<AUegameHUD>(CurrentPC->GetHUD()) : nullptr;
+			const double Elapsed = FPlatformTime::Seconds() - StartedAt;
+			const float TravelCm = CurrentPawn
+				? FVector::Dist2D(CurrentPawn->GetActorLocation(), StartLocation)
+				: 0.0f;
+
+			if (DriveGeneration != GObjectiveRouteDriveGeneration)
+			{
+				return false;
+			}
+			if (!CurrentWorld || !CurrentPC || !CurrentPawn || !CurrentHUD)
+			{
+				ReleaseObjectiveRouteDriveInput(TEXT("world-or-player-lost"), TravelCm, Elapsed);
+				return false;
+			}
+			if (Elapsed >= MaxSeconds)
+			{
+				ReleaseObjectiveRouteDriveInput(TEXT("timeout"), TravelCm, Elapsed);
+				CurrentHUD->LogObjectiveRouteStatusForTests();
+				return false;
+			}
+
+			float NearestThreatCm = TNumericLimits<float>::Max();
+			for (TActorIterator<ADungeonEnemy> It(CurrentWorld); It; ++It)
+			{
+				if (IsValid(*It) && (*It)->IsActiveThreat())
+				{
+					NearestThreatCm = FMath::Min(NearestThreatCm,
+						FVector::Dist2D((*It)->GetActorLocation(), CurrentPawn->GetActorLocation()));
+				}
+			}
+			if (NearestThreatCm <= 220.0f)
+			{
+				ReleaseObjectiveRouteDriveInput(TEXT("attack-range"), TravelCm, Elapsed);
+				CurrentHUD->LogObjectiveRouteStatusForTests();
+				return false;
+			}
+
+			FVector Waypoint = LastWaypoint;
+			if (CurrentHUD->TryGetObjectiveRouteWaypointForTests(Waypoint))
+			{
+				LastWaypoint = Waypoint;
+				RouteUnavailableAt = -1.0;
+			}
+			else
+			{
+				if (RouteUnavailableAt < 0.0)
+				{
+					RouteUnavailableAt = FPlatformTime::Seconds();
+				}
+				if (FPlatformTime::Seconds() - RouteUnavailableAt > 0.5)
+				{
+					ReleaseObjectiveRouteDriveInput(TEXT("route-unavailable"), TravelCm, Elapsed);
+					CurrentHUD->LogObjectiveRouteStatusForTests();
+					return false;
+				}
+			}
+
+			const FVector ToWaypoint = Waypoint - CurrentPawn->GetActorLocation();
+			if (ToWaypoint.SizeSquared2D() > FMath::Square(1.0f))
+			{
+				FRotator Rotation = CurrentPC->GetControlRotation();
+				const float TargetYaw = ToWaypoint.Rotation().Yaw;
+				Rotation.Yaw = FMath::FixedTurn(Rotation.Yaw, TargetYaw,
+					FMath::Clamp(DeltaSeconds, 0.0f, 0.1f) * 150.0f);
+				Rotation.Pitch = 0.0f;
+				Rotation.Roll = 0.0f;
+				CurrentPC->SetControlRotation(Rotation);
+			}
+			CurrentPC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::W, IE_Repeat, 1.0f));
+			return true;
+		}), 0.0f);
+}
+
+void DungeonRouteRespawnPawnCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	AGameModeBase* GameMode = World ? World->GetAuthGameMode<AGameModeBase>() : nullptr;
+	APawn* OldPawn = PC ? PC->GetPawn() : nullptr;
+	if (!World || !World->IsGameWorld() || !PC || !GameMode || !OldPawn)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[ObjectiveRoutePawnChurn] respawn=false reason=missing-world-player-or-mode"));
+		return;
+	}
+
+	const uint32 OldPawnKey = GetTypeHash(OldPawn);
+	FTransform RespawnTransform = OldPawn->GetActorTransform();
+	RespawnTransform.AddToTranslation(FVector(0.0f, 0.0f, 150.0f));
+	PC->UnPossess();
+	OldPawn->Destroy();
+	GameMode->RestartPlayerAtTransform(PC, RespawnTransform);
+	APawn* NewPawn = PC->GetPawn();
+	const uint32 NewPawnKey = IsValid(NewPawn) ? GetTypeHash(NewPawn) : 0;
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRoutePawnChurn] respawn=%s oldPawnKey=%u newPawnKey=%u changed=%s"),
+		IsValid(NewPawn) ? TEXT("true") : TEXT("false"), OldPawnKey, NewPawnKey,
+		OldPawnKey != NewPawnKey && NewPawnKey != 0 ? TEXT("true") : TEXT("false"));
+}
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonExitWithdrawalFailureCmd(
 	TEXT("Dungeon.ExitWithdrawalFailure"),
 	TEXT("Development-only negative seam: force floor-exit withdrawal failure (0|1)"),
@@ -1130,6 +1329,26 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonContractFreshSpawnerFailureCmd(
 	TEXT("Dungeon.ContractFreshSpawnerFailure"),
 	TEXT("Development-only seam: make room-contract fresh-spawner lookup fail (0|1)"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonContractFreshSpawnerFailureCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRouteFaultModeCmd(
+	TEXT("Dungeon.RouteFaultMode"),
+	TEXT("Development-only objective route seam: 0 normal; 1/2 projection; 3 invalid; 4 partial; 5 no fresh authority; 6 ambiguous authority"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRouteFaultModeCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRouteStatusCmd(
+	TEXT("Dungeon.RouteStatus"),
+	TEXT("Development-only readback of the HUD route cache and query serial"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRouteStatusCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRouteDriveCmd(
+	TEXT("Dungeon.RouteDrive"),
+	TEXT("Development-only smooth held-W traversal of the visible objective route: [maxSeconds|stop]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRouteDriveCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRouteRespawnPawnCmd(
+	TEXT("Dungeon.RouteRespawnPawn"),
+	TEXT("Development-only pawn-identity churn probe for route-cache invalidation"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRouteRespawnPawnCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

@@ -12,15 +12,23 @@
 #include "EngineUtils.h"        // TActorIterator
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/PlatformTime.h"
 #include "Math/UnrealMathUtility.h"
+#include "NavigationData.h"
+#include "NavigationPath.h"
+#include "NavigationSystem.h"
+#include "NavigationSystemTypes.h"
 
 #include "../Combat/BuildSynergyComponent.h"
 #include "../Combat/DungeonEnemy.h"
+#include "../Combat/DungeonStairs.h"
 #include "../Combat/EncounterConfig.h"
 #include "../Combat/FloorManager.h"
 #include "../Combat/HealthComponent.h"
 #include "../Combat/LoadoutComponent.h"
 #include "../DungeonSpawner.h"
+
+#include "m8_objective_compass.hpp"
 
 // --- Toggles (default ON: this is readability UI we want visible in normal play + capture) ---
 static TAutoConsoleVariable<int32> CVarShowReadout(
@@ -31,6 +39,11 @@ static TAutoConsoleVariable<int32> CVarShowReadout(
 static TAutoConsoleVariable<float> CVarReadoutScale(
 	TEXT("ui.ShowReadoutScale"), 1.0f,
 	TEXT("M7A.1 readability HUD text scale multiplier (clamped 0.5..4.0; default 1.0)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShowObjectiveRoute(
+	TEXT("ui.ShowObjectiveRoute"), 1,
+	TEXT("Capsule-agent NavMesh objective route: 1 = query/draw, 0 = zero route queries."),
 	ECVF_Default);
 
 // --- M7A.2 per-enemy readout (archetype nameplates + live HP bars) ---
@@ -67,6 +80,8 @@ namespace
 	const FLinearColor kAccent(1.00f, 0.84f, 0.20f, 1.0f);   // yellow: reward / attention
 	const FLinearColor kDim   (0.60f, 0.60f, 0.60f, 1.0f);   // dim: unavailable / stale
 	const FLinearColor kPanelBg(0.0f, 0.0f, 0.0f, 0.55f);    // translucent black backing
+	constexpr float kRouteThreatAcquireRangeCm = 450.0f;
+	constexpr float kRouteThreatHoldRangeCm = 750.0f;
 
 	// M7A.2 HP bar palette. Screen-space UI colors only - this is NOT the M7B world-material
 	// archetype tint; BodyMID/kEnemyBaseColor/hit-flash are untouched by contract.
@@ -102,6 +117,196 @@ namespace
 			}
 		}
 		return nullptr;
+	}
+
+	// Objective routing has stricter authority than the legacy readout: exactly one current
+	// encounter snapshot must match the active run and floor. Ambiguity clears the arrow.
+	ADungeonSpawner* FindFreshObjectiveSpawner(UWorld* World, const UUegameFloorManager* FM)
+	{
+		if (!World || !FM || !FM->IsRunActive())
+		{
+			return nullptr;
+		}
+		ADungeonSpawner* Match = nullptr;
+		for (TActorIterator<ADungeonSpawner> It(World); It; ++It)
+		{
+			ADungeonSpawner* Candidate = *It;
+			if (!IsValid(Candidate) || Candidate->IsActorBeingDestroyed()
+				|| !Candidate->HasEncounterAssignment()
+				|| Candidate->GetEncounterRunSeed() != FM->GetRunSeed()
+				|| Candidate->GetEncounterFloorIndex() != FM->GetFloorIndex())
+			{
+				continue;
+			}
+			if (Match)
+			{
+				return nullptr;
+			}
+			Match = Candidate;
+		}
+		return Match;
+	}
+
+	FString ObjectiveDirection(const FVector& Target, const APawn* Pawn, const APlayerController* PC)
+	{
+		const FVector Delta = Pawn ? Target - Pawn->GetActorLocation() : FVector::ZeroVector;
+		const FVector CameraForward = PC && PC->PlayerCameraManager
+			? PC->PlayerCameraManager->GetCameraRotation().Vector() : FVector::ZeroVector;
+		const FVector PlayerForward = Pawn ? Pawn->GetActorForwardVector() : FVector::ForwardVector;
+		return ANSI_TO_TCHAR(m8objective::direction_name(m8objective::map_direction(
+			{ Delta.X, Delta.Y }, { CameraForward.X, CameraForward.Y },
+			{ PlayerForward.X, PlayerForward.Y })));
+	}
+
+	struct FObjectiveSelection
+	{
+		FHudLine Line;
+		AActor* Target = nullptr;
+		FVector TargetLocation = FVector::ZeroVector;
+		uint32 TargetKey = 0;
+		uint64 RunSeed = 0;
+		uint32 SpawnerKey = 0;
+		int32 FloorIndex = INDEX_NONE;
+	};
+
+	FObjectiveSelection MakeObjective(
+		FString Text, AActor* Target, const FVector& Location,
+		const UUegameFloorManager* FM, const ADungeonSpawner* Spawner, uint32 SyntheticKey = 0)
+	{
+		FObjectiveSelection Selection;
+		Selection.Line = { MoveTemp(Text), kAccent };
+		Selection.Target = Target;
+		Selection.TargetLocation = Location;
+		Selection.TargetKey = SyntheticKey != 0 ? SyntheticKey : (Target ? Target->GetUniqueID() : 0);
+		Selection.RunSeed = FM ? FM->GetRunSeed() : 0;
+		Selection.SpawnerKey = Spawner ? Spawner->GetUniqueID() : 0;
+		Selection.FloorIndex = FM ? FM->GetFloorIndex() : INDEX_NONE;
+		return Selection;
+	}
+
+	FObjectiveSelection SelectObjective(
+		UWorld* World, APawn* Pawn, const ULoadoutComponent* LC, const UUegameFloorManager* FM,
+		AActor* LockedTarget, uint64 LockedRunSeed, int32 LockedFloorIndex, uint32 LockedSpawnerKey,
+		int32 AuthorityFaultMode)
+	{
+		if (FM && FM->IsRoomContractPending())
+		{
+			return { { TEXT("OBJECTIVE: CHOOSE ROOM CONTRACT [1/2]"), kAccent } };
+		}
+		if (LC && LC->IsRewardPending())
+		{
+			return { { TEXT("OBJECTIVE: CHOOSE REWARD [1/2/3]"), kAccent } };
+		}
+		ADungeonSpawner* Spawner = AuthorityFaultMode >= 5 ? nullptr : FindFreshObjectiveSpawner(World, FM);
+		if (!Pawn || !Spawner)
+		{
+			return { { FM && FM->IsRunActive()
+				? TEXT("OBJECTIVE: NO CURRENT TARGET") : TEXT("OBJECTIVE: STARTING RUN"), kDim } };
+		}
+
+		if (FM->IsFloorObjectiveComplete())
+		{
+			ADungeonStairs* BoundStairs = nullptr;
+			int32 Matches = 0;
+			const FVector Expected = Spawner->GetFarthestRoomCenterWorld();
+			for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+			{
+				ADungeonStairs* Candidate = *It;
+				if (IsValid(Candidate) && !Candidate->IsActorBeingDestroyed()
+					&& FVector::DistSquared2D(Candidate->GetActorLocation(), Expected) <= 1.0f)
+				{
+					BoundStairs = Candidate;
+					++Matches;
+				}
+			}
+			if (Matches == 1 && BoundStairs)
+			{
+				const float Metres = FVector::Dist2D(Pawn->GetActorLocation(), BoundStairs->GetActorLocation()) / 100.0f;
+				return MakeObjective(FString::Printf(TEXT("OBJECTIVE: STAIRS %.1fm"), Metres),
+					BoundStairs, BoundStairs->GetActorLocation(), FM, Spawner);
+			}
+			return { { TEXT("OBJECTIVE: EXIT READY - STAIRS UNAVAILABLE"), kDim } };
+		}
+
+		// A chosen contract room is the first tactical commitment while it still has threats.
+		int32 ObjectiveRoom = FM->GetSelectedContractRoom();
+		if (ObjectiveRoom < 0 || Spawner->GetAliveInRoom(ObjectiveRoom) <= 0)
+		{
+			ObjectiveRoom = INDEX_NONE;
+			int32 BestRisk = TNumericLimits<int32>::Max();
+			float BestDistance = TNumericLimits<float>::Max();
+			const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+			for (int32 Room = 0; Room < Spawner->GetRoomCount(); ++Room)
+			{
+				if (Spawner->GetAliveInRoom(Room) <= 0 || !Roles.IsValidIndex(Room))
+				{
+					continue;
+				}
+				const int32 Risk = m8objective::room_risk_priority(Roles[Room]);
+				const float Distance = FVector::DistSquared2D(Pawn->GetActorLocation(), Spawner->GetRoomCenterWorld(Room));
+				if (ObjectiveRoom == INDEX_NONE || Risk < BestRisk
+					|| (Risk == BestRisk && (Distance < BestDistance
+						|| (FMath::IsNearlyEqual(Distance, BestDistance) && Room < ObjectiveRoom))))
+				{
+					ObjectiveRoom = Room;
+					BestRisk = Risk;
+					BestDistance = Distance;
+				}
+			}
+		}
+
+		ADungeonEnemy* BestEnemy = nullptr;
+		ADungeonEnemy* LockedEnemy = nullptr;
+		m8objective::CandidateKey BestKey;
+		for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+		{
+			ADungeonEnemy* Enemy = *It;
+			if (!IsValid(Enemy) || Enemy->IsActorBeingDestroyed() || !Enemy->IsActiveThreat()
+				|| Enemy->GetOwningSpawner() != Spawner || Enemy->GetRoomIndex() != ObjectiveRoom)
+			{
+				continue;
+			}
+			const int32 Ordinal = Enemy->GetSpawnOrdinal();
+			const m8objective::CandidateKey Key{
+				static_cast<double>(FVector::DistSquared2D(Pawn->GetActorLocation(), Enemy->GetActorLocation())),
+				Ordinal >= 0 ? static_cast<uint32>(Ordinal) : 0u, Enemy->GetUniqueID(), Ordinal >= 0 };
+			if (!BestEnemy || m8objective::candidate_less(Key, BestKey))
+			{
+				BestEnemy = Enemy;
+				BestKey = Key;
+			}
+			if (Enemy == LockedTarget && LockedRunSeed == FM->GetRunSeed()
+				&& LockedFloorIndex == FM->GetFloorIndex() && LockedSpawnerKey == Spawner->GetUniqueID())
+			{
+				LockedEnemy = Enemy;
+			}
+		}
+
+		if (ObjectiveRoom != INDEX_NONE)
+		{
+			const FVector RoomCenter = Spawner->GetRoomCenterWorld(ObjectiveRoom);
+			const float RoomMetres = FVector::Dist2D(Pawn->GetActorLocation(), RoomCenter) / 100.0f;
+			ADungeonEnemy* SelectedEnemy = LockedEnemy ? LockedEnemy : BestEnemy;
+			const float EnemyMetres = SelectedEnemy
+				? FVector::Dist2D(Pawn->GetActorLocation(), SelectedEnemy->GetActorLocation()) / 100.0f : BIG_NUMBER;
+			const bool bLockedNearby = SelectedEnemy == LockedEnemy && EnemyMetres <= kRouteThreatHoldRangeCm / 100.0f;
+			const bool bAcquireNearby = SelectedEnemy && EnemyMetres <= kRouteThreatAcquireRangeCm / 100.0f;
+			if ((bLockedNearby || bAcquireNearby || RoomMetres <= 4.5f) && SelectedEnemy)
+			{
+				return MakeObjective(FString::Printf(TEXT("OBJECTIVE: R%d %s %.1fm"), ObjectiveRoom,
+					SelectedEnemy->GetArchetypeDisplayName(), EnemyMetres), SelectedEnemy,
+					SelectedEnemy->GetActorLocation(), FM, Spawner);
+			}
+			uint32 RoomKey = (Spawner->GetUniqueID() * 16777619u) ^ static_cast<uint32>(ObjectiveRoom + 1);
+			if (RoomKey == 0) { RoomKey = 1; }
+			const bool bContractRoom = ObjectiveRoom == FM->GetSelectedContractRoom();
+			const FString RoomText = bContractRoom
+				? FString::Printf(TEXT("OBJECTIVE: CONTRACT ROOM R%d %.1fm"), ObjectiveRoom, RoomMetres)
+				: FString::Printf(TEXT("OBJECTIVE: ROOM R%d %.1fm"), ObjectiveRoom, RoomMetres);
+			return MakeObjective(RoomText, Spawner, RoomCenter, FM, Spawner, RoomKey);
+		}
+
+		return { { TEXT("OBJECTIVE: NO CURRENT TARGET"), kDim } };
 	}
 
 	// Nearest room by 2D distance from the pawn to each room center. Uses the spawner's own room
@@ -178,6 +383,274 @@ namespace
 		return PanelW;
 	}
 }
+
+void AUegameHUD::InvalidateObjectiveRoute()
+{
+	ObjectiveRouteWaypoint = FVector::ZeroVector;
+	ObjectiveRouteRunSeed = 0;
+	ObjectiveRouteTargetKey = 0;
+	ObjectiveRoutePawnKey = 0;
+	ObjectiveRouteFloorIndex = INDEX_NONE;
+	ObjectiveRouteStatus = EObjectiveRouteStatus::None;
+	ObjectiveRouteLastResult = 0;
+}
+
+void AUegameHUD::InvalidateObjectiveTarget()
+{
+	ObjectiveTargetLock.Reset();
+	ObjectiveTargetLockRunSeed = 0;
+	ObjectiveTargetLockSpawnerKey = 0;
+	ObjectiveTargetLockFloorIndex = INDEX_NONE;
+	bObjectiveRouteDeferQueryOnce = false;
+	InvalidateObjectiveRoute();
+}
+
+FString AUegameHUD::ResolveObjectiveRouteCue(
+	UWorld* World, APawn* Pawn, AActor* Target, uint32 TargetKey,
+	uint64 RunSeed, int32 FloorIndex, const FVector& TargetLocation)
+{
+	if (!World || !IsValid(Pawn) || Pawn->IsActorBeingDestroyed()
+		|| !IsValid(Target) || Target->IsActorBeingDestroyed())
+	{
+		InvalidateObjectiveRoute();
+		return TEXT("ROUTE BLOCKED");
+	}
+
+	const uint32 PawnKey = Pawn->GetUniqueID();
+	const bool bIdentityChanged = ObjectiveRouteTargetKey != TargetKey
+		|| ObjectiveRoutePawnKey != PawnKey || ObjectiveRouteRunSeed != RunSeed
+		|| ObjectiveRouteFloorIndex != FloorIndex;
+	if (bIdentityChanged)
+	{
+		const uint32 OldTargetKey = ObjectiveRouteTargetKey;
+		const uint32 OldPawnKey = ObjectiveRoutePawnKey;
+		const uint64 OldRunSeed = ObjectiveRouteRunSeed;
+		const int32 OldFloorIndex = ObjectiveRouteFloorIndex;
+		InvalidateObjectiveRoute();
+		ObjectiveRouteTargetKey = TargetKey;
+		ObjectiveRoutePawnKey = PawnKey;
+		ObjectiveRouteRunSeed = RunSeed;
+		ObjectiveRouteFloorIndex = FloorIndex;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::Updating;
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Display,
+			TEXT("[ObjectiveRouteInvalidated] reason=route-identity-change oldTargetKey=%u newTargetKey=%u oldPawnKey=%u newPawnKey=%u oldRunSeed=%llu newRunSeed=%llu oldFloor=%d newFloor=%d arrow=false stale=false"),
+			OldTargetKey, TargetKey, OldPawnKey, PawnKey,
+			static_cast<unsigned long long>(OldRunSeed), static_cast<unsigned long long>(RunSeed),
+			OldFloorIndex, FloorIndex);
+#endif
+	}
+	if (bObjectiveRouteDeferQueryOnce)
+	{
+		bObjectiveRouteDeferQueryOnce = false;
+		ObjectiveRouteWaypoint = FVector::ZeroVector;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::Updating;
+		return TEXT("ROUTE UPDATING");
+	}
+
+	// A combat objective is reached at attack range, not at the enemy capsule center. Continuing
+	// to point through a body produces wall-like shoving and teaches the wrong player action.
+	if (Cast<ADungeonEnemy>(Target)
+		&& FVector::Dist2D(Pawn->GetActorLocation(), TargetLocation) <= 220.0f)
+	{
+		ObjectiveRouteWaypoint = FVector::ZeroVector;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::None;
+		ObjectiveRouteLastResult = 0;
+		return TEXT("IN RANGE - ATTACK [F]");
+	}
+
+	const double Now = FPlatformTime::Seconds();
+	if (ObjectiveRouteQueryTimestampCount > 0 && Now < ObjectiveRouteLastQuerySeconds)
+	{
+		ObjectiveRouteQueryTimestampCount = 0;
+		ObjectiveRouteLastQuerySeconds = -1.0;
+	}
+	std::vector<double> PriorTimestamps;
+	PriorTimestamps.reserve(static_cast<std::size_t>(ObjectiveRouteQueryTimestampCount));
+	for (int32 Index = 0; Index < ObjectiveRouteQueryTimestampCount; ++Index)
+	{
+		PriorTimestamps.push_back(ObjectiveRouteQueryTimestamps[Index]);
+	}
+	if (!m8objective::route_query_allowed(Now, PriorTimestamps))
+	{
+		if (ObjectiveRouteStatus == EObjectiveRouteStatus::Ready)
+		{
+			return FString::Printf(TEXT("ROUTE %s"),
+				*ObjectiveDirection(ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController()));
+		}
+		return ObjectiveRouteStatus == EObjectiveRouteStatus::Blocked
+			? TEXT("ROUTE BLOCKED") : TEXT("ROUTE UPDATING");
+	}
+	if (ObjectiveRouteQueryTimestampCount == static_cast<int32>(m8objective::kRouteQueryMaximumPerSecond))
+	{
+		for (int32 Index = 1; Index < ObjectiveRouteQueryTimestampCount; ++Index)
+		{
+			ObjectiveRouteQueryTimestamps[Index - 1] = ObjectiveRouteQueryTimestamps[Index];
+		}
+		--ObjectiveRouteQueryTimestampCount;
+	}
+	ObjectiveRouteQueryTimestamps[ObjectiveRouteQueryTimestampCount++] = Now;
+	ObjectiveRouteLastQuerySeconds = Now;
+	++ObjectiveRouteQuerySerial;
+
+	auto FailRoute = [this, Now, TargetKey, RunSeed, FloorIndex, Pawn](const TCHAR* Result, uint8 ResultCode,
+		const ANavigationData* NavData, const FNavAgentProperties& AgentProps,
+		const FVector& Start, const FVector& End, int32 PointCount, bool bPartial,
+		double QueryStarted) -> FString
+	{
+		ObjectiveRouteLastQueryDurationMs = (FPlatformTime::Seconds() - QueryStarted) * 1000.0;
+		ObjectiveRouteWaypoint = FVector::ZeroVector;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::Blocked;
+		ObjectiveRouteLastResult = ResultCode;
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Display,
+			TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=%s arrow=false stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) points=%d partial=%s durationMs=%.3f"),
+			static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
+			static_cast<unsigned long long>(RunSeed), FloorIndex, Result,
+			NavData ? *NavData->GetName() : TEXT("NONE"),
+			NavData ? *NavData->GetClass()->GetName() : TEXT("NONE"),
+			AgentProps.AgentRadius, AgentProps.AgentHeight,
+			Start.X, Start.Y, Start.Z, End.X, End.Y, End.Z,
+			Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, Pawn->GetActorLocation().Z,
+			PointCount, bPartial ? TEXT("true") : TEXT("false"), ObjectiveRouteLastQueryDurationMs);
+#endif
+		return TEXT("ROUTE BLOCKED");
+	};
+
+	const double QueryStarted = FPlatformTime::Seconds();
+	const FNavAgentProperties& AgentProps = Pawn->GetNavAgentPropertiesRef();
+	UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	const ANavigationData* NavData = NavSystem
+		? NavSystem->GetNavDataForProps(AgentProps, Pawn->GetActorLocation()) : nullptr;
+	if (!NavSystem || !NavData)
+	{
+		return FailRoute(TEXT("NO_MATCHING_NAVDATA"), 1, NavData, AgentProps,
+			Pawn->GetActorLocation(), TargetLocation, 0, false, QueryStarted);
+	}
+
+	const float Radius = FMath::Max(AgentProps.AgentRadius, 35.0f);
+	const float Height = FMath::Max(AgentProps.AgentHeight, 88.0f);
+	const FVector ProjectionExtent(FMath::Max(Radius * 2.0f, 100.0f),
+		FMath::Max(Radius * 2.0f, 100.0f), FMath::Max(Height, 200.0f));
+	FNavLocation ProjectedStart;
+	FNavLocation ProjectedEnd;
+	bool bStartProjected = NavSystem->ProjectPointToNavigation(
+		Pawn->GetActorLocation(), ProjectedStart, ProjectionExtent, NavData);
+	bool bEndProjected = NavSystem->ProjectPointToNavigation(
+		TargetLocation, ProjectedEnd, ProjectionExtent, NavData);
+#if !UE_BUILD_SHIPPING
+	if (ObjectiveRouteFaultModeForTests == 1) { bStartProjected = false; }
+	if (ObjectiveRouteFaultModeForTests == 2) { bEndProjected = false; }
+#endif
+	if (!bStartProjected)
+	{
+		return FailRoute(TEXT("START_PROJECTION_FAILED"), 2, NavData, AgentProps,
+			Pawn->GetActorLocation(), TargetLocation, 0, false, QueryStarted);
+	}
+	if (!bEndProjected)
+	{
+		return FailRoute(TEXT("END_PROJECTION_FAILED"), 3, NavData, AgentProps,
+			ProjectedStart.Location, TargetLocation, 0, false, QueryStarted);
+	}
+
+	FPathFindingQuery Query(Pawn, *NavData, ProjectedStart.Location, ProjectedEnd.Location);
+	Query.SetAllowPartialPaths(false);
+	FPathFindingResult PathResult = NavSystem->FindPathSync(Query);
+	bool bSuccessful = PathResult.IsSuccessful() && PathResult.Path.IsValid();
+	bool bPartial = bSuccessful && PathResult.IsPartial();
+	int32 PointCount = bSuccessful ? PathResult.Path->GetPathPoints().Num() : 0;
+#if !UE_BUILD_SHIPPING
+	if (ObjectiveRouteFaultModeForTests == 3) { bSuccessful = false; PointCount = 0; }
+	if (ObjectiveRouteFaultModeForTests == 4) { bPartial = true; }
+#endif
+	if (!bSuccessful)
+	{
+		return FailRoute(TEXT("PATH_INVALID"), 4, NavData, AgentProps,
+			ProjectedStart.Location, ProjectedEnd.Location, PointCount, bPartial, QueryStarted);
+	}
+	if (bPartial)
+	{
+		return FailRoute(TEXT("PATH_PARTIAL_REJECTED"), 5, NavData, AgentProps,
+			ProjectedStart.Location, ProjectedEnd.Location, PointCount, true, QueryStarted);
+	}
+	if (PointCount < 2)
+	{
+		return FailRoute(TEXT("PATH_TOO_SHORT"), 6, NavData, AgentProps,
+			ProjectedStart.Location, ProjectedEnd.Location, PointCount, false, QueryStarted);
+	}
+
+	const TArray<FNavPathPoint>& PathPoints = PathResult.Path->GetPathPoints();
+	std::vector<m8objective::Vec2> OrderedPoints;
+	OrderedPoints.reserve(static_cast<std::size_t>(PointCount));
+	for (const FNavPathPoint& Point : PathPoints)
+	{
+		OrderedPoints.push_back({ Point.Location.X, Point.Location.Y });
+	}
+	const m8objective::WaypointChoice Choice = m8objective::select_route_waypoint(
+		OrderedPoints, { Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y },
+		{ ProjectedEnd.Location.X, ProjectedEnd.Location.Y }, 150.0);
+	ObjectiveRouteWaypoint = Choice.used_target_fallback
+		? ProjectedEnd.Location : PathPoints[static_cast<int32>(Choice.path_index)].Location;
+	ObjectiveRouteStatus = EObjectiveRouteStatus::Ready;
+	ObjectiveRouteLastResult = 7;
+	ObjectiveRouteLastQueryDurationMs = (FPlatformTime::Seconds() - QueryStarted) * 1000.0;
+	const FString Direction = ObjectiveDirection(ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController());
+	const float ControlYaw = GetOwningPlayerController()
+		? GetOwningPlayerController()->GetControlRotation().Yaw : Pawn->GetActorRotation().Yaw;
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=READY arrow=true stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) waypoint=(%.1f,%.1f,%.1f) controlYaw=%.1f points=%d partial=false fallback=%s direction=%s durationMs=%.3f"),
+		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
+		static_cast<unsigned long long>(RunSeed), FloorIndex,
+		*NavData->GetName(), *NavData->GetClass()->GetName(), AgentProps.AgentRadius, AgentProps.AgentHeight,
+		ProjectedStart.Location.X, ProjectedStart.Location.Y, ProjectedStart.Location.Z,
+		ProjectedEnd.Location.X, ProjectedEnd.Location.Y, ProjectedEnd.Location.Z,
+		Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, Pawn->GetActorLocation().Z,
+		ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
+		ControlYaw, PointCount, Choice.used_target_fallback ? TEXT("true") : TEXT("false"),
+		*Direction, ObjectiveRouteLastQueryDurationMs);
+#endif
+	return FString::Printf(TEXT("ROUTE %s"), *Direction);
+}
+
+#if !UE_BUILD_SHIPPING
+void AUegameHUD::SetObjectiveRouteFaultModeForTests(int32 Mode)
+{
+	ObjectiveRouteFaultModeForTests = FMath::Clamp(Mode, 0, 6);
+	InvalidateObjectiveRoute();
+	bObjectiveRouteDeferQueryOnce = true;
+	UE_LOG(LogTemp, Display, TEXT("[ObjectiveRouteTest] faultMode=%d serial=%llu arrow=false"),
+		ObjectiveRouteFaultModeForTests, static_cast<unsigned long long>(ObjectiveRouteQuerySerial));
+}
+
+void AUegameHUD::LogObjectiveRouteStatusForTests() const
+{
+	const TCHAR* Status = ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("READY")
+		: ObjectiveRouteStatus == EObjectiveRouteStatus::Blocked ? TEXT("BLOCKED")
+		: ObjectiveRouteStatus == EObjectiveRouteStatus::Updating ? TEXT("UPDATING") : TEXT("NONE");
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRouteStatus] status=%s arrow=%s serial=%llu result=%u targetKey=%u pawnKey=%u runSeed=%llu floor=%d waypoint=(%.1f,%.1f,%.1f) faultMode=%d"),
+		Status, ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("true") : TEXT("false"),
+		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), ObjectiveRouteLastResult,
+		ObjectiveRouteTargetKey, ObjectiveRoutePawnKey,
+		static_cast<unsigned long long>(ObjectiveRouteRunSeed), ObjectiveRouteFloorIndex,
+		ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
+		ObjectiveRouteFaultModeForTests);
+}
+
+bool AUegameHUD::TryGetObjectiveRouteWaypointForTests(FVector& OutWaypoint) const
+{
+	if (ObjectiveRouteStatus != EObjectiveRouteStatus::Ready
+		|| ObjectiveRouteWaypoint.IsNearlyZero())
+	{
+		OutWaypoint = FVector::ZeroVector;
+		return false;
+	}
+
+	OutWaypoint = ObjectiveRouteWaypoint;
+	return true;
+}
+#endif
 
 void AUegameHUD::DrawHUD()
 {
@@ -349,6 +822,80 @@ void AUegameHUD::DrawHUD()
 	const float Rx = FMath::Max(24.0f, Canvas->SizeX - 24.0f - RightPanelW);
 	DrawPanel(this, Font, Rx, 24.0f, Right, Scale);
 
+	// ---------------- Objective: live target plus capsule-agent NavMesh waypoint ----------------
+	// The target is a read-only view of current gameplay state. Route certification comes only
+	// from the pawn's matching NavData and a non-partial path; any authority/query failure clears it.
+	TArray<FHudLine> Objective;
+	const bool bObjectivePawnValid = IsValid(Pawn) && !Pawn->IsActorBeingDestroyed()
+		&& (!HP || !HP->IsDead());
+	FObjectiveSelection ObjectiveSelection = SelectObjective(
+		World, bObjectivePawnValid ? Pawn : nullptr, LC, FM,
+		ObjectiveTargetLock.Get(), ObjectiveTargetLockRunSeed,
+		ObjectiveTargetLockFloorIndex, ObjectiveTargetLockSpawnerKey,
+#if !UE_BUILD_SHIPPING
+		ObjectiveRouteFaultModeForTests
+#else
+		0
+#endif
+	);
+	if (ObjectiveSelection.Target)
+	{
+		const bool bLockChanged = ObjectiveTargetLock.Get() != ObjectiveSelection.Target
+			|| ObjectiveTargetLockRunSeed != ObjectiveSelection.RunSeed
+			|| ObjectiveTargetLockFloorIndex != ObjectiveSelection.FloorIndex
+			|| ObjectiveTargetLockSpawnerKey != ObjectiveSelection.SpawnerKey;
+		if (bLockChanged)
+		{
+			const uint32 OldTargetKey = ObjectiveRouteTargetKey;
+			ObjectiveTargetLock = ObjectiveSelection.Target;
+			ObjectiveTargetLockRunSeed = ObjectiveSelection.RunSeed;
+			ObjectiveTargetLockFloorIndex = ObjectiveSelection.FloorIndex;
+			ObjectiveTargetLockSpawnerKey = ObjectiveSelection.SpawnerKey;
+			InvalidateObjectiveRoute();
+			bObjectiveRouteDeferQueryOnce = true;
+#if !UE_BUILD_SHIPPING
+			UE_LOG(LogTemp, Display,
+				TEXT("[ObjectiveRouteInvalidated] reason=identity-change oldTargetKey=%u newTargetKey=%u runSeed=%llu floor=%d arrow=false stale=false"),
+				OldTargetKey, ObjectiveSelection.TargetKey,
+				static_cast<unsigned long long>(ObjectiveSelection.RunSeed), ObjectiveSelection.FloorIndex);
+#endif
+		}
+		if (CVarShowObjectiveRoute.GetValueOnGameThread() != 0)
+		{
+			ObjectiveSelection.Line.Text += TEXT("  ");
+			ObjectiveSelection.Line.Text += ResolveObjectiveRouteCue(
+				World, Pawn, ObjectiveSelection.Target, ObjectiveSelection.TargetKey,
+				ObjectiveSelection.RunSeed, ObjectiveSelection.FloorIndex,
+				ObjectiveSelection.TargetLocation);
+		}
+		else
+		{
+			// A disabled route is a strict zero-query baseline, never a frozen arrow.
+			InvalidateObjectiveRoute();
+		}
+	}
+	else
+	{
+		const uint32 OldTargetKey = ObjectiveRouteTargetKey;
+		InvalidateObjectiveTarget();
+#if !UE_BUILD_SHIPPING
+		if (OldTargetKey != 0)
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[ObjectiveRouteInvalidated] reason=no-authoritative-target oldTargetKey=%u newTargetKey=0 arrow=false stale=false"),
+				OldTargetKey);
+		}
+#endif
+	}
+	Objective.Add(ObjectiveSelection.Line);
+	float ObjectiveW = 0.0f, ObjectiveLineH = 0.0f;
+	MeasurePanel(this, Font, Objective, Scale, ObjectiveW, ObjectiveLineH);
+	const float ObjectivePanelW = ObjectiveW + 16.0f * Scale;
+	const float ObjectivePanelH = ObjectiveLineH + 16.0f * Scale;
+	const float ObjectiveY = FMath::Max(24.0f, Canvas->SizeY - 24.0f - ObjectivePanelH);
+	DrawPanel(this, Font, FMath::Max(24.0f, (Canvas->SizeX - ObjectivePanelW) * 0.5f),
+		ObjectiveY, Objective, Scale);
+
 	// ---------------- Center: onboarding plus authoritative pause/result flow ----------------
 	TArray<FHudLine> Center;
 	if (FM && FM->IsRunActive())
@@ -398,8 +945,10 @@ void AUegameHUD::DrawHUD()
 		float CenterW = 0.0f, CenterLineH = 0.0f;
 		MeasurePanel(this, Font, Center, Scale, CenterW, CenterLineH);
 		const float CenterPanelW = CenterW + 2.0f * (8.0f * Scale);
+		const float CenterPanelH = Center.Num() * CenterLineH
+			+ FMath::Max(0, Center.Num() - 1) * 3.0f * Scale + 16.0f * Scale;
 		DrawPanel(this, Font, (Canvas->SizeX - CenterPanelW) * 0.5f,
-			Canvas->SizeY - 72.0f * Scale, Center, Scale);
+			FMath::Max(24.0f, ObjectiveY - 12.0f * Scale - CenterPanelH), Center, Scale);
 	}
 
 	// Transient feedback reads the component's real proc/reset state; the HUD owns no duplicate truth.
