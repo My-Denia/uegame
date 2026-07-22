@@ -10,6 +10,7 @@
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
 #include "Combat/LoadoutComponent.h"
+#include "Presentation/PresentationFeedbackComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -66,6 +67,7 @@ AuegameCharacter::AuegameCharacter()
 	// M5 build-diversity: the loadout state holder (reward-on-clear); base stats built in BeginPlay.
 	Loadout = CreateDefaultSubobject<ULoadoutComponent>(TEXT("Loadout"));
 	BuildSynergy = CreateDefaultSubobject<UBuildSynergyComponent>(TEXT("BuildSynergy"));
+	PresentationFeedback = CreateDefaultSubobject<UPresentationFeedbackComponent>(TEXT("PresentationFeedback"));
 }
 
 void AuegameCharacter::BeginPlay()
@@ -120,7 +122,7 @@ void AuegameCharacter::DoQuit()
 	}
 }
 
-void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageInstigator*/)
+void AuegameCharacter::HandlePlayerDamaged(float Amount, AActor* /*DamageInstigator*/)
 {
 	// Brief red screen pulse via a camera fade (0.5 -> 0 alpha over 0.25s). No UMG asset; the
 	// [Feedback] anchor makes it grep-testable that the pulse fired on the contact-damage event.
@@ -131,6 +133,10 @@ void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageIns
 			PC->PlayerCameraManager->StartCameraFade(0.5f, 0.0f, 0.25f, FLinearColor::Red,
 				/*bShouldFadeAudio=*/false, /*bHoldWhenFinished=*/false);
 		}
+	}
+	if (PresentationFeedback)
+	{
+		PresentationFeedback->EmitPlayerDamaged(Amount);
 	}
 	UE_LOG(LogTemp, Display, TEXT("[Feedback] playerPulse hp=%.0f"), Health ? Health->GetHP() : -1.0f);
 }

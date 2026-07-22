@@ -14,6 +14,7 @@ class UHealthComponent;
 class UCombatComponent;
 class ULoadoutComponent;
 class UBuildSynergyComponent;
+class UPresentationFeedbackComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -70,6 +71,10 @@ protected:
 	/** M8A transient build-identity state; rules remain in the engine-independent core. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	UBuildSynergyComponent* BuildSynergy;
+
+	/** Short-lived event feedback only; owns no gameplay truth. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Presentation")
+	UPresentationFeedbackComponent* PresentationFeedback;
 
 public:
 

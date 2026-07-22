@@ -122,3 +122,8 @@ add_executable(m8_runtime_authority_test
                m8_runtime_authority.cpp)
 target_sources(m8_runtime_authority_test PRIVATE m8_runtime_authority.hpp)
 add_test(NAME m8_runtime_authority COMMAND m8_runtime_authority_test)
+
+# --- M8 presentation: deterministic project-owned event tone PCM (additive; no UE) ---
+add_executable(m8_presentation_test test_m8_presentation.cpp m8_presentation.cpp)
+target_sources(m8_presentation_test PRIVATE m8_presentation.hpp)
+add_test(NAME m8_presentation COMMAND m8_presentation_test)

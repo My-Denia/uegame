@@ -7,6 +7,7 @@
 #include "DungeonEnemy.h"
 #include "HealthComponent.h"
 #include "LoadoutComponent.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
@@ -187,6 +188,22 @@ void UCombatComponent::TryAttack()
 				bPrimaryDead ? TEXT("true") : TEXT("false"),
 				Proc.Heal, Proc.CooldownRefundMs);
 		}
+	}
+
+	// Presentation is emitted once after the entire base + E/T/B transaction. A kill replaces
+	// the ordinary hit outcome; the visual component can still render the accepted swing itself.
+	int32 Kills = 0;
+	for (const FCandidate& Candidate : Candidates)
+	{
+		if (Candidate.Health && Candidate.PreHP > 0 && Candidate.Health->IsDead())
+		{
+			++Kills;
+		}
+	}
+	if (UPresentationFeedbackComponent* Feedback =
+		Owner->FindComponentByClass<UPresentationFeedbackComponent>())
+	{
+		Feedback->EmitAttackResolved(Hits, Kills);
 	}
 
 	// Run 2.5 feedback anchor: fires on every swing, hit or miss (grep-testable the arc drew).

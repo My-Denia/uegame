@@ -5,6 +5,7 @@
 #include "DungeonEnemy.h"
 #include "HealthComponent.h"
 #include "LoadoutComponent.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 #include "Engine/World.h"
 
 // The engine-independent implementation is compiled once by M8BuildSynergyCore.cpp.
@@ -277,7 +278,13 @@ FBuildSynergySwingResult UBuildSynergyComponent::ReconcileAcceptedSwing(
 	if (Out.tempo_reset_by_miss) { Cues.Add(TEXT("TEMPO RESET - MISS")); }
 	if (!Cues.IsEmpty())
 	{
-		SetFeedback(FString::Join(Cues, TEXT(" | ")), NowSeconds);
+		const FString CueText = FString::Join(Cues, TEXT(" | "));
+		SetFeedback(CueText, NowSeconds);
+		if (UPresentationFeedbackComponent* Presentation = GetOwner()
+			? GetOwner()->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr)
+		{
+			Presentation->EmitBuildProc(CueText);
+		}
 	}
 	UE_LOG(LogTemp, Display,
 		TEXT("[BuildState] event=swing rawE=%d rawT=%d rawB=%d actualE=%d actualT=%d actualB=%d finalPool=%d dead=%s heal=%d refundMs=%d tempo=%d missReset=%s counterConsumed=%s counter=%s"),

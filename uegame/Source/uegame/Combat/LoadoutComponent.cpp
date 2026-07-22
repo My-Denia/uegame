@@ -5,6 +5,7 @@
 #include "BuildSynergyComponent.h"
 #include "CombatConfig.h"
 #include "HealthComponent.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 #include "GameFramework/Actor.h"
 
 // Engine-agnostic loadout core - .cpp-only include (repo-root PrivateIncludePaths, uegame.Build.cs).
@@ -228,6 +229,11 @@ bool ULoadoutComponent::GenerateOfferForFloor(uint64 InRunSeed, int32 InFloorInd
 	// which reads CurrentOfferIds live and labels them via DescribeAffixById). The old transient yellow
 	// AddOnScreenDebugMessage was redundant and overlapped the panel, so it is removed (owner readout
 	// item 2). The [Loadout] offer/RewardPending UE_LOG lines above stay as the forensic record.
+	if (UPresentationFeedbackComponent* Presentation = GetOwner()
+		? GetOwner()->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr)
+	{
+		Presentation->EmitRewardOffered();
+	}
 	return true;
 }
 
@@ -260,6 +266,11 @@ bool ULoadoutComponent::ChooseOffer(int32 Index)
 		TEXT("[Loadout] chose index=%d id=%d (%s) | resolved dmg=%d attack_ms=%d max_hp=%d move=%d | picks=%d"),
 		Index, ChosenId, A ? *DescribeAffix(*A) : TEXT("?"),
 		ResolvedDamage, ResolvedAttackMs, ResolvedMaxHP, ResolvedMoveSpeed, ChosenAffixIds.Num());
+	if (UPresentationFeedbackComponent* Presentation = GetOwner()
+		? GetOwner()->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr)
+	{
+		Presentation->EmitRewardChosen(A ? DescribeAffix(*A) : FString::Printf(TEXT("AFFIX %d"), ChosenId));
+	}
 	return true;
 }
 

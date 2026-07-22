@@ -27,6 +27,7 @@
 #include "../Combat/HealthComponent.h"
 #include "../Combat/LoadoutComponent.h"
 #include "../DungeonSpawner.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 
 #include "m8_objective_compass.hpp"
 
@@ -814,9 +815,48 @@ void AUegameHUD::DrawHUD()
 	ULoadoutComponent* LC = Pawn ? Pawn->FindComponentByClass<ULoadoutComponent>() : nullptr;
 	UBuildSynergyComponent* Synergy = Pawn
 		? Pawn->FindComponentByClass<UBuildSynergyComponent>() : nullptr;
+	UPresentationFeedbackComponent* Presentation = Pawn
+		? Pawn->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr;
 	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
 	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
 	ADungeonSpawner* Spawner = FindSpawner(World);
+
+	// Shipping-path combat feedback: Canvas primitives are normal HUD rendering, not debug draw.
+	// The component retains only event-derived expiry and never supplies gameplay truth.
+	if (Presentation)
+	{
+		const float CenterX = Canvas->SizeX * 0.5f;
+		const float CenterY = Canvas->SizeY * 0.5f;
+		const float SwingAlpha = Presentation->GetSwingAlpha();
+		if (SwingAlpha > 0.0f)
+		{
+			const FLinearColor SwingColor = Presentation->WasLastSwingKill()
+				? FLinearColor(1.0f, 0.2f, 0.12f, SwingAlpha)
+				: FLinearColor(1.0f, 0.84f, 0.20f, SwingAlpha);
+			const float Reach = 52.0f * Scale;
+			DrawLine(CenterX - Reach, CenterY + Reach * 0.55f,
+				CenterX + Reach, CenterY - Reach * 0.55f, SwingColor, 4.0f * Scale);
+			DrawLine(CenterX - Reach * 0.72f, CenterY + Reach * 0.82f,
+				CenterX + Reach * 0.72f, CenterY - Reach * 0.82f, SwingColor, 2.0f * Scale);
+		}
+		const float HitAlpha = Presentation->GetHitMarkerAlpha();
+		if (HitAlpha > 0.0f)
+		{
+			const FLinearColor HitColor = Presentation->WasLastSwingKill()
+				? FLinearColor(1.0f, 0.15f, 0.1f, HitAlpha)
+				: FLinearColor(1.0f, 1.0f, 1.0f, HitAlpha);
+			const float Inner = 7.0f * Scale;
+			const float Outer = 18.0f * Scale;
+			DrawLine(CenterX - Outer, CenterY - Outer, CenterX - Inner, CenterY - Inner,
+				HitColor, 3.0f * Scale);
+			DrawLine(CenterX + Inner, CenterY + Inner, CenterX + Outer, CenterY + Outer,
+				HitColor, 3.0f * Scale);
+			DrawLine(CenterX + Inner, CenterY - Inner, CenterX + Outer, CenterY - Outer,
+				HitColor, 3.0f * Scale);
+			DrawLine(CenterX - Outer, CenterY + Outer, CenterX - Inner, CenterY + Inner,
+				HitColor, 3.0f * Scale);
+		}
+	}
 
 	// ---------------- Left panel: player / build / reward offer ----------------
 	TArray<FHudLine> Left;
@@ -1126,20 +1166,22 @@ void AUegameHUD::DrawHUD()
 			FMath::Max(24.0f, ObjectiveY - 12.0f * Scale - CenterPanelH), Center, Scale);
 	}
 
-	// Transient feedback reads the component's real proc/reset state; the HUD owns no duplicate truth.
-	if (Synergy)
+	// One transient cue lane. Presentation priority wins; the existing synergy component remains
+	// the fallback live owner for proc text, so the HUD never caches or duplicates either state.
+	FString TransientCue = Presentation ? Presentation->GetTransientText() : FString();
+	if (TransientCue.IsEmpty() && Synergy)
 	{
-		const FString Cue = Synergy->GetFeedbackText();
-		if (!Cue.IsEmpty())
-		{
-			TArray<FHudLine> CueLines;
-			CueLines.Add({ Cue, kAccent });
-			float CueW = 0.0f, CueH = 0.0f;
-			MeasurePanel(this, Font, CueLines, Scale * 1.25f, CueW, CueH);
-			DrawPanel(this, Font,
-				FMath::Max(24.0f, (Canvas->SizeX - CueW - 16.0f * Scale) * 0.5f),
-				Canvas->SizeY * 0.72f, CueLines, Scale * 1.25f);
-		}
+		TransientCue = Synergy->GetFeedbackText();
+	}
+	if (!TransientCue.IsEmpty())
+	{
+		TArray<FHudLine> CueLines;
+		CueLines.Add({ TransientCue, kAccent });
+		float CueW = 0.0f, CueH = 0.0f;
+		MeasurePanel(this, Font, CueLines, Scale * 1.25f, CueW, CueH);
+		DrawPanel(this, Font,
+			FMath::Max(24.0f, (Canvas->SizeX - CueW - 16.0f * Scale) * 0.5f),
+			Canvas->SizeY * 0.72f, CueLines, Scale * 1.25f);
 	}
 
 	// ---------------- M7A.2: per-enemy readout (nameplates + HP bars) ----------------

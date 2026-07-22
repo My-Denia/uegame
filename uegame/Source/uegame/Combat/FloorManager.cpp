@@ -6,6 +6,7 @@
 #include "DungeonStairs.h"
 #include "HealthComponent.h"
 #include "LoadoutComponent.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 #include "../DungeonSpawner.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -279,6 +280,7 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d resolve=0"),
 		static_cast<unsigned long long>(RunSeed), FUegameCombatConfig::Get().MaxFloors);
 	ResetLoadoutForNewRun();   // M5: a run is a fresh build (clears any picks from a prior run this session)
+	ResetPresentationForNewRun();
 	StartFloor(1);
 }
 
@@ -464,11 +466,6 @@ void UUegameFloorManager::NotifyRunFailed()
 	UE_LOG(LogTemp, Display, TEXT("[RunFailed] floor=%d runSeed=%llu%s"),
 		FloorIndex, static_cast<unsigned long long>(RunSeed),
 		bUpgradedPendingDescend ? TEXT(" (death overrides pending descend)") : TEXT(""));
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Red,
-			FString::Printf(TEXT("RUN FAILED on floor %d. Press R to restart or Q to quit."), FloorIndex));
-	}
 	EnterTerminalState(m8authority::RunEvent::Fail, TEXT("RunFailed"));
 }
 
@@ -489,11 +486,6 @@ void UUegameFloorManager::ExecutePendingTransition()
 		// Evidence (acceptance E): win path.
 		UE_LOG(LogTemp, Display, TEXT("[RunWon] runSeed=%llu floorsCleared=%d"),
 			static_cast<unsigned long long>(RunSeed), FloorIndex);
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Green,
-				FString::Printf(TEXT("RUN WON - %d floors! Press R to play again or Q to quit."), FloorIndex));
-		}
 		EnterTerminalState(m8authority::RunEvent::Win, TEXT("RunWon"));
 	}
 	else
@@ -516,6 +508,7 @@ void UUegameFloorManager::RestartRun(const TCHAR* Reason)
 	ResolveTokens = 0;
 	HealPlayerFull();
 	m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::AckRestart);
+	ResetPresentationForNewRun();
 	StartFloor(1);
 }
 
@@ -560,6 +553,17 @@ void UUegameFloorManager::EnterTerminalState(m8authority::RunEvent Event, const 
 	RefreshWorldPause();
 	UE_LOG(LogTemp, Display, TEXT("[RunState] source=%s state=%d manualActionRequired=true"),
 		LogAnchor, static_cast<int32>(RuntimeLifecycle.state));
+	if (UPresentationFeedbackComponent* Presentation = FindPlayerPresentation())
+	{
+		if (Event == m8authority::RunEvent::Win)
+		{
+			Presentation->EmitRunWon();
+		}
+		else if (Event == m8authority::RunEvent::Fail)
+		{
+			Presentation->EmitRunFailed();
+		}
+	}
 }
 
 void UUegameFloorManager::NotifyFinaleInitFailed()
@@ -644,11 +648,27 @@ ULoadoutComponent* UUegameFloorManager::FindPlayerLoadout() const
 	return Pawn ? Pawn->FindComponentByClass<ULoadoutComponent>() : nullptr;
 }
 
+UPresentationFeedbackComponent* UUegameFloorManager::FindPlayerPresentation() const
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	return Pawn ? Pawn->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr;
+}
+
 void UUegameFloorManager::ResetLoadoutForNewRun() const
 {
 	if (ULoadoutComponent* LC = FindPlayerLoadout())
 	{
 		LC->ResetForNewRun();
+	}
+}
+
+void UUegameFloorManager::ResetPresentationForNewRun() const
+{
+	if (UPresentationFeedbackComponent* Presentation = FindPlayerPresentation())
+	{
+		Presentation->ResetForNewRun();
 	}
 }
 

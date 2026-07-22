@@ -16,6 +16,7 @@
 
 class ADungeonSpawner;
 class ULoadoutComponent;
+class UPresentationFeedbackComponent;
 struct FActorsInitializedParams;
 
 enum class EUegameRoomContractChoice : uint8
@@ -152,8 +153,10 @@ private:
 
 	/** M5: the player pawn's loadout component (nullptr if no pawn / no component). */
 	ULoadoutComponent* FindPlayerLoadout() const;
+	UPresentationFeedbackComponent* FindPlayerPresentation() const;
 	/** M5: reset the loadout to a fresh base build at run (re)start (picks cleared, MaxHP back to base). */
 	void ResetLoadoutForNewRun() const;
+	void ResetPresentationForNewRun() const;
 	/** M5: re-attempt descend on every stairs pad after a reward pick (no-op unless the pawn is on a pad). */
 	void RepokeStairsForDescend() const;
 	void ApplyPostRewardRecovery() const;
