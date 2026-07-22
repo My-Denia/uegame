@@ -248,6 +248,8 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 			continue;
 		}
 		Enemy->InitEnemy(EffCfg, P.roomIndex, this);
+		// Additive runtime ordering only; the frozen plan count/order/placement is unchanged.
+		Enemy->SetSpawnOrdinal(PlanIdx);
 		if (bEncounterAssigned && EnemyTypes.IsValidIndex(PlanIdx))
 		{
 			const int32 T = EnemyTypes[PlanIdx];

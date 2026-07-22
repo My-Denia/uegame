@@ -39,10 +39,17 @@ public:
 	void ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, int32 InTypeId);
 
 	int32 GetRoomIndex() const { return RoomIndex; }
+	/** Deterministic combat ordering key assigned from the frozen spawn plan index. */
+	int32 GetSpawnOrdinal() const { return SpawnOrdinal; }
 	/** Read-only ownership used by the spawner's floor-exit safety transaction. */
 	ADungeonSpawner* GetOwningSpawner() const { return SpawnerRef.Get(); }
 	/** True only while this actor can still pursue or damage the player. */
 	bool IsActiveThreat() const;
+	/** Current pool for player targeting. Warden may substitute guard in S2.5. */
+	int32 GetCombatPoolCurrent() const;
+	int32 GetCombatPoolMax() const;
+	/** Apply integer player damage and return the authoritative amount removed. */
+	int32 ApplyPlayerDamage(int32 Amount, AActor* DamageInstigator);
 	bool IsRoomChallengeModified() const { return bRoomChallengeModified; }
 
 	// --- M7A.2 read-only identity/HP surface (consumed by the AUegameHUD enemy readout) ---
@@ -72,6 +79,7 @@ public:
 
 private:
 	friend class ADungeonSpawner;
+	void SetSpawnOrdinal(int32 InOrdinal) { SpawnOrdinal = InOrdinal; }
 	/** Stop damage, movement, collision and visibility synchronously, then queue destroy. */
 	bool NeutralizeForFloorExit(bool& bOutDestroyQueued);
 	bool CanApplyRoomChallengeModifier() const;
@@ -101,6 +109,7 @@ private:
 	FTimerHandle FlashTimer;
 
 	int32 RoomIndex = -1;
+	int32 SpawnOrdinal = INDEX_NONE;
 	/** M7A.2: archetype identity (m6::TypeId order); INDEX_NONE = no M6 assignment.
 	 *  Reset by InitEnemy, set only by ApplyArchetype. Not reflected: presentation-facing
 	 *  runtime state, never serialized and never exposed for mutation. */

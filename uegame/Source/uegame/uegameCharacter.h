@@ -13,6 +13,7 @@ class UInputAction;
 class UHealthComponent;
 class UCombatComponent;
 class ULoadoutComponent;
+class UBuildSynergyComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -65,6 +66,10 @@ protected:
 	/** M5 build-diversity: the run's affix picks + resolved stats (reward earned on floor clear). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	ULoadoutComponent* Loadout;
+
+	/** M8A transient build-identity state; rules remain in the engine-independent core. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	UBuildSynergyComponent* BuildSynergy;
 
 public:
 

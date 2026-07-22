@@ -14,6 +14,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Math/UnrealMathUtility.h"
 
+#include "../Combat/BuildSynergyComponent.h"
 #include "../Combat/DungeonEnemy.h"
 #include "../Combat/EncounterConfig.h"
 #include "../Combat/FloorManager.h"
@@ -197,6 +198,8 @@ void AUegameHUD::DrawHUD()
 	APlayerController* PC = GetOwningPlayerController();
 	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
 	ULoadoutComponent* LC = Pawn ? Pawn->FindComponentByClass<ULoadoutComponent>() : nullptr;
+	UBuildSynergyComponent* Synergy = Pawn
+		? Pawn->FindComponentByClass<UBuildSynergyComponent>() : nullptr;
 	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
 	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
 	ADungeonSpawner* Spawner = FindSpawner(World);
@@ -244,6 +247,26 @@ void AUegameHUD::DrawHUD()
 	else
 	{
 		Left.Add({ TEXT("(loadout not initialized)"), kDim });
+	}
+	if (Synergy)
+	{
+		const int32 E = Synergy->GetExecutionerRank();
+		const int32 T = Synergy->GetTempoRank();
+		const int32 B = Synergy->GetBulwarkRank();
+		Left.Add({ E > 0
+			? FString::Printf(TEXT("Executioner R%d  finish <=40%% HP"), E)
+			: TEXT("Executioner --"), E > 0 ? kBody : kDim });
+		Left.Add({ T > 0
+			? FString::Printf(TEXT("Tempo       R%d  chain %d/%d"),
+				T, Synergy->GetTempoChain(), Synergy->GetTempoThreshold())
+			: TEXT("Tempo       --"), T > 0 ? kBody : kDim });
+		Left.Add({ B > 0
+			? (Synergy->IsCounterReady()
+				? FString::Printf(TEXT("Bulwark     R%d  COUNTER %.2fs"),
+					B, Synergy->GetCounterRemainingSeconds())
+				: FString::Printf(TEXT("Bulwark     R%d  take a hit, then counter"), B))
+			: TEXT("Bulwark     --"),
+			Synergy->IsCounterReady() ? kAccent : (B > 0 ? kBody : kDim) });
 	}
 	DrawPanel(this, Font, 24.0f, 24.0f, Left, Scale);
 
@@ -377,6 +400,22 @@ void AUegameHUD::DrawHUD()
 		const float CenterPanelW = CenterW + 2.0f * (8.0f * Scale);
 		DrawPanel(this, Font, (Canvas->SizeX - CenterPanelW) * 0.5f,
 			Canvas->SizeY - 72.0f * Scale, Center, Scale);
+	}
+
+	// Transient feedback reads the component's real proc/reset state; the HUD owns no duplicate truth.
+	if (Synergy)
+	{
+		const FString Cue = Synergy->GetFeedbackText();
+		if (!Cue.IsEmpty())
+		{
+			TArray<FHudLine> CueLines;
+			CueLines.Add({ Cue, kAccent });
+			float CueW = 0.0f, CueH = 0.0f;
+			MeasurePanel(this, Font, CueLines, Scale * 1.25f, CueW, CueH);
+			DrawPanel(this, Font,
+				FMath::Max(24.0f, (Canvas->SizeX - CueW - 16.0f * Scale) * 0.5f),
+				Canvas->SizeY * 0.72f, CueLines, Scale * 1.25f);
+		}
 	}
 
 	// ---------------- M7A.2: per-enemy readout (nameplates + HP bars) ----------------

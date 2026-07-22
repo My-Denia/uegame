@@ -4,6 +4,7 @@
 #include "Engine/LocalPlayer.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Combat/BuildSynergyComponent.h"
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/FloorManager.h"
@@ -64,6 +65,7 @@ AuegameCharacter::AuegameCharacter()
 
 	// M5 build-diversity: the loadout state holder (reward-on-clear); base stats built in BeginPlay.
 	Loadout = CreateDefaultSubobject<ULoadoutComponent>(TEXT("Loadout"));
+	BuildSynergy = CreateDefaultSubobject<UBuildSynergyComponent>(TEXT("BuildSynergy"));
 }
 
 void AuegameCharacter::BeginPlay()

@@ -70,6 +70,7 @@ ADungeonEnemy::ADungeonEnemy()
 void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, ADungeonSpawner* InSpawner)
 {
 	RoomIndex = InRoomIndex;
+	SpawnOrdinal = INDEX_NONE;
 	SpawnerRef = InSpawner;
 	// M7A.2: explicit reset - identity is "unassigned" until ApplyArchetype runs, so the
 	// static-spawner / encounter-unavailable path can never inherit a stale id.
@@ -289,6 +290,27 @@ bool ADungeonEnemy::IsActiveThreat() const
 		&& !IsActorBeingDestroyed()
 		&& Health
 		&& !Health->IsDead();
+}
+
+int32 ADungeonEnemy::GetCombatPoolCurrent() const
+{
+	return Health ? FMath::Max(0, FMath::RoundToInt(Health->GetHP())) : 0;
+}
+
+int32 ADungeonEnemy::GetCombatPoolMax() const
+{
+	return Health ? FMath::Max(1, FMath::RoundToInt(Health->GetMaxHP())) : 1;
+}
+
+int32 ADungeonEnemy::ApplyPlayerDamage(int32 Amount, AActor* DamageInstigator)
+{
+	if (!Health || Health->IsDead() || Amount <= 0)
+	{
+		return 0;
+	}
+	const int32 Before = GetCombatPoolCurrent();
+	Health->TakeDamage(static_cast<float>(Amount), DamageInstigator);
+	return FMath::Max(0, Before - GetCombatPoolCurrent());
 }
 
 bool ADungeonEnemy::CanApplyRoomChallengeModifier() const
