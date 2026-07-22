@@ -1301,6 +1301,7 @@ void DungeonFinaleStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	ADungeonEnemy* Warden = Spawner ? Spawner->GetWarden() : nullptr;
 	const UHealthComponent* HP = Warden ? Warden->GetHealthComponent() : nullptr;
 	int32 WardenActors = 0;
+	int32 StairsActors = 0;
 	if (World && Spawner)
 	{
 		for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
@@ -1312,13 +1313,23 @@ void DungeonFinaleStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 			}
 		}
 	}
+	if (World)
+	{
+		for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+		{
+			if (IsValid(*It) && !It->IsActorBeingDestroyed())
+			{
+				++StairsActors;
+			}
+		}
+	}
 	UE_LOG(LogTemp, Display,
-		TEXT("[FinaleStatus] runState=%d floor=%d resolve=%d init=%d wardenActors=%d pointer=%s defeated=%s ordinaryAlive=%d room=%d ordinal=%d sourceType=%d phase=%d guard=%d/%d hp=%.0f/%.0f assignedDamage=%.0f committedDamage=%.0f objective=%s exitSafe=%s"),
+		TEXT("[FinaleStatus] runState=%d floor=%d resolve=%d init=%d stairsActors=%d wardenActors=%d pointer=%s defeated=%s ordinaryAlive=%d room=%d ordinal=%d sourceType=%d phase=%d guard=%d/%d hp=%.0f/%.0f assignedDamage=%.0f committedDamage=%.0f objective=%s exitSafe=%s"),
 		FM ? static_cast<int32>(FM->GetRunState()) : -1,
 		FM ? FM->GetFloorIndex() : -1,
 		FM ? FM->GetResolveTokens() : 0,
 		Spawner ? static_cast<int32>(Spawner->GetFinaleInitState()) : -1,
-		WardenActors, Warden ? TEXT("true") : TEXT("false"),
+		StairsActors, WardenActors, Warden ? TEXT("true") : TEXT("false"),
 		(Spawner && Spawner->IsWardenDefeated()) ? TEXT("true") : TEXT("false"),
 		Spawner ? Spawner->GetLivingOrdinaryEnemyCount() : 0,
 		Warden ? Warden->GetRoomIndex() : INDEX_NONE,

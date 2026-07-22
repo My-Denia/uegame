@@ -1013,6 +1013,18 @@ bool ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 	SpawnedEnemyActors.Reset();
 	LastPlannedRooms.Reset();
 	LastPlannedEnemyCount = 0;
+	// Retract the prior floor's exit before any new-floor actor is published. SpawnStairs()
+	// also enforces uniqueness defensively, but a failed finale never calls it; leaving this
+	// cleanup there would strand the prior floor's live trigger in the failed transaction.
+	int32 DespawnedStairs = 0;
+	for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+	{
+		if (IsValid(*It) && !It->IsActorBeingDestroyed())
+		{
+			It->Destroy();
+			++DespawnedStairs;
+		}
+	}
 
 	// Despawn floor-N enemies silently (Destroy path skips HandleDeath, so no RoomClear noise).
 	int32 Despawned = 0;
@@ -1046,8 +1058,8 @@ bool ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 	}
 
 	UE_LOG(LogTemp, Display,
-		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d finaleRequested=%s finaleCommitted=%s (in-place, world+navsystem kept alive)"),
-		static_cast<unsigned long long>(NewSeed), Despawned,
+		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d despawnedStairs=%d finaleRequested=%s finaleCommitted=%s (in-place, world+navsystem kept alive)"),
+		static_cast<unsigned long long>(NewSeed), Despawned, DespawnedStairs,
 		FinaleConfig ? TEXT("true") : TEXT("false"), bFinaleCommitted ? TEXT("true") : TEXT("false"));
 	return bFinaleCommitted;
 }
