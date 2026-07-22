@@ -12,5 +12,6 @@ public class uegameEditorTarget : TargetRules
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
 		ExtraModuleNames.Add("uegame");
 		ExtraModuleNames.Add("uegameEditor");
+		EnablePlugins.Add("ModelContextProtocol");
 	}
 }
