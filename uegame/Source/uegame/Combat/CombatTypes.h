@@ -39,6 +39,44 @@ struct FCombatConfigRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy")
 	float LeashRange = 1400.0f;
 
+	// --- M8 fixed-profile finale (never M4-scaled; source archetype is provenance only) ---
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenMaxHP = 300.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenMoveSpeed = 190.0f;
+
+	/** Assigned damage; the existing M8 behavior commitment rule applies 75% => 12. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenContactDamage = 16.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenDamageInterval = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenAggroRange = 1100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenLeashRange = 1600.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenMeshScale = 1.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	int32 WardenBaseGuard = 120;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	int32 WardenGuardReductionPerResolve = 30;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	int32 WardenMinimumGuard = 60;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenStaggerSeconds = 2.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenStaggerDamageMultiplier = 1.5f;
+
 	// --- player ---
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Player")
 	float PlayerMaxHP = 100.0f;

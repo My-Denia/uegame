@@ -77,6 +77,13 @@ void UBuildSynergyComponent::ClearRanksAndTransient()
 
 void UBuildSynergyComponent::RefreshFromLoadout()
 {
+#if !UE_BUILD_SHIPPING
+	if (bSkipNextLoadoutRefreshForTests)
+	{
+		bSkipNextLoadoutRefreshForTests = false;
+		return;
+	}
+#endif
 	const ULoadoutComponent* Loadout = GetOwner()
 		? GetOwner()->FindComponentByClass<ULoadoutComponent>() : nullptr;
 	if (!Loadout)
@@ -175,7 +182,7 @@ void UBuildSynergyComponent::HandleOwnerDeath(AActor* /*DeadActor*/)
 		ExecutionerRank, TempoRank, BulwarkRank);
 }
 
-FBuildSynergySwingResult UBuildSynergyComponent::ResolveAcceptedSwing(
+FBuildSynergySwingPlan UBuildSynergyComponent::PlanAcceptedSwing(
 	int32 BaseDamage, int32 AttackCooldownMs, int32 Hits, double NowSeconds,
 	bool bHasPrimary, int32 PrimaryPreHP, int32 PrimaryMaxHP, int32 PrimaryHPAfterBase)
 {
@@ -190,16 +197,60 @@ FBuildSynergySwingResult UBuildSynergyComponent::ResolveAcceptedSwing(
 	Input.primary_current_hp = PrimaryPreHP;
 	Input.primary_max_hp = PrimaryMaxHP;
 	Input.primary_hp_after_base = PrimaryHPAfterBase;
-	const m8::SwingResult Out = m8::resolve_accepted_swing(State, Input);
+	const m8::SwingPlan Out = m8::plan_accepted_swing(State, Input);
 
 	TempoChain = State.tempo_chain;
 	bCounterActive = State.counter_active;
 	CounterExpiresAtMs = State.counter_expires_at_ms;
 
+	FBuildSynergySwingPlan Result;
+	Result.ExecutionerDamage = Out.executioner_damage;
+	Result.TempoDamage = Out.tempo_damage;
+	Result.BulwarkDamage = Out.bulwark_damage;
+	Result.HealRequest = Out.heal_request;
+	Result.AttackCooldownMs = Out.attack_cooldown_ms;
+	Result.ExecutionerRank = Out.executioner_rank;
+	Result.TempoChainAfter = Out.tempo_chain_after;
+	Result.bExecutionerQualified = Out.executioner_qualified;
+	Result.bTempoProc = Out.tempo_proc;
+	Result.bTempoResetByMiss = Out.tempo_reset_by_miss;
+	Result.bCounterConsumed = Out.counter_consumed;
+	return Result;
+}
+
+FBuildSynergySwingResult UBuildSynergyComponent::ReconcileAcceptedSwing(
+	const FBuildSynergySwingPlan& Plan,
+	int32 ExecutionerAppliedDamage, int32 TempoAppliedDamage,
+	int32 BulwarkAppliedDamage, int32 PrimaryPoolAfter,
+	bool bPrimaryDeadAfter, double NowSeconds)
+{
+	m8::SwingPlan CorePlan;
+	CorePlan.executioner_damage = Plan.ExecutionerDamage;
+	CorePlan.tempo_damage = Plan.TempoDamage;
+	CorePlan.bulwark_damage = Plan.BulwarkDamage;
+	CorePlan.heal_request = Plan.HealRequest;
+	CorePlan.attack_cooldown_ms = Plan.AttackCooldownMs;
+	CorePlan.executioner_rank = Plan.ExecutionerRank;
+	CorePlan.tempo_chain_after = Plan.TempoChainAfter;
+	CorePlan.executioner_qualified = Plan.bExecutionerQualified;
+	CorePlan.tempo_proc = Plan.bTempoProc;
+	CorePlan.tempo_reset_by_miss = Plan.bTempoResetByMiss;
+	CorePlan.counter_consumed = Plan.bCounterConsumed;
+	m8::SwingActual Actual;
+	Actual.executioner_damage = FMath::Max(0, ExecutionerAppliedDamage);
+	Actual.tempo_damage = FMath::Max(0, TempoAppliedDamage);
+	Actual.bulwark_damage = FMath::Max(0, BulwarkAppliedDamage);
+	Actual.primary_pool_after = FMath::Max(0, PrimaryPoolAfter);
+	Actual.primary_dead_after = bPrimaryDeadAfter;
+	const m8::SwingResult Out = m8::reconcile_accepted_swing(CorePlan, Actual);
+
 	FBuildSynergySwingResult Result;
 	Result.ExecutionerDamage = Out.executioner_damage;
 	Result.TempoDamage = Out.tempo_damage;
 	Result.BulwarkDamage = Out.bulwark_damage;
+	Result.ExecutionerAppliedDamage = Actual.executioner_damage;
+	Result.TempoAppliedDamage = Actual.tempo_damage;
+	Result.BulwarkAppliedDamage = Actual.bulwark_damage;
 	if (Out.heal > 0)
 	{
 		if (UHealthComponent* Health = GetOwner()
@@ -229,8 +280,10 @@ FBuildSynergySwingResult UBuildSynergyComponent::ResolveAcceptedSwing(
 		SetFeedback(FString::Join(Cues, TEXT(" | ")), NowSeconds);
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("[BuildState] event=swing hits=%d E=%d T=%d B=%d heal=%d refundMs=%d tempo=%d missReset=%s counterConsumed=%s counter=%s"),
-		Hits, Result.ExecutionerDamage, Result.TempoDamage, Result.BulwarkDamage,
+		TEXT("[BuildState] event=swing rawE=%d rawT=%d rawB=%d actualE=%d actualT=%d actualB=%d finalPool=%d dead=%s heal=%d refundMs=%d tempo=%d missReset=%s counterConsumed=%s counter=%s"),
+		Result.ExecutionerDamage, Result.TempoDamage, Result.BulwarkDamage,
+		Result.ExecutionerAppliedDamage, Result.TempoAppliedDamage, Result.BulwarkAppliedDamage,
+		PrimaryPoolAfter, bPrimaryDeadAfter ? TEXT("true") : TEXT("false"),
 		Result.Heal, Result.CooldownRefundMs, TempoChain,
 		Result.bTempoResetByMiss ? TEXT("true") : TEXT("false"),
 		Result.bCounterConsumed ? TEXT("true") : TEXT("false"),
@@ -254,3 +307,23 @@ FString UBuildSynergyComponent::GetFeedbackText() const
 	const UWorld* World = GetWorld();
 	return World && World->GetTimeSeconds() <= FeedbackExpiresAt ? FeedbackText : FString();
 }
+
+#if !UE_BUILD_SHIPPING
+void UBuildSynergyComponent::SetStateForTests(
+	int32 InExecutioner, int32 InTempo, int32 InBulwark,
+	int32 InTempoChain, int32 CounterRemainingMs)
+{
+	ExecutionerRank = FMath::Clamp(InExecutioner, 0, 2);
+	TempoRank = FMath::Clamp(InTempo, 0, 2);
+	BulwarkRank = FMath::Clamp(InBulwark, 0, 2);
+	TempoChain = FMath::Max(0, InTempoChain);
+	bCounterActive = BulwarkRank > 0 && CounterRemainingMs >= 0;
+	CounterExpiresAtMs = bCounterActive ? GetNowMs() + CounterRemainingMs : 0;
+	LoadoutFingerprint = 1;
+	bSkipNextLoadoutRefreshForTests = true;
+	UE_LOG(LogTemp, Display,
+		TEXT("[BuildStateTest] E=%d T=%d B=%d tempo=%d counter=%s remainingMs=%d"),
+		ExecutionerRank, TempoRank, BulwarkRank, TempoChain,
+		bCounterActive ? TEXT("true") : TEXT("false"), CounterRemainingMs);
+}
+#endif

@@ -125,29 +125,52 @@ std::int64_t counter_remaining_ms(const State& state, std::int64_t now_ms)
 
 SwingResult resolve_accepted_swing(State& state, const SwingInput& input)
 {
-	SwingResult out;
+	const SwingPlan plan = plan_accepted_swing(state, input);
+	SwingActual actual;
+	int hp = input.has_primary ? std::max(0, input.primary_hp_after_base) : 0;
+	if (hp > 0 && plan.executioner_damage > 0)
+	{
+		actual.executioner_damage = std::min(hp, plan.executioner_damage);
+		hp = apply_to_hp(hp, actual.executioner_damage);
+	}
+	if (hp > 0 && plan.tempo_damage > 0)
+	{
+		actual.tempo_damage = std::min(hp, plan.tempo_damage);
+		hp = apply_to_hp(hp, actual.tempo_damage);
+	}
+	if (hp > 0 && plan.bulwark_damage > 0)
+	{
+		actual.bulwark_damage = std::min(hp, plan.bulwark_damage);
+		hp = apply_to_hp(hp, actual.bulwark_damage);
+	}
+	actual.primary_pool_after = hp;
+	actual.primary_dead_after = input.has_primary && hp <= 0;
+	return reconcile_accepted_swing(plan, actual);
+}
+
+SwingPlan plan_accepted_swing(State& state, const SwingInput& input)
+{
+	SwingPlan out;
 	if (!input.accepted)
 	{
 		out.tempo_chain_after = state.tempo_chain;
-		out.primary_hp_after_synergies = input.has_primary
-			? std::max(0, input.primary_hp_after_base) : 0;
 		return out;
 	}
 	const int executioner_rank = clamp_rank(input.ranks.executioner);
 	const int tempo_rank = clamp_rank(input.ranks.tempo);
 	const int bulwark_rank = clamp_rank(input.ranks.bulwark);
 	const bool successful = input.hits > 0;
-	int hp = input.has_primary ? std::max(0, input.primary_hp_after_base) : 0;
+	const bool primary_alive_after_base = input.has_primary && input.primary_hp_after_base > 0;
+	out.executioner_rank = executioner_rank;
+	out.attack_cooldown_ms = std::max(0, input.attack_cooldown_ms);
 
 	// Executioner uses the pre-base snapshot and never retargets after base damage.
 	out.executioner_qualified = input.has_primary && executioner_rank > 0
 		&& at_or_below_threshold(
 			input.primary_current_hp, input.primary_max_hp, kExecutionerThresholdPct);
-	if (out.executioner_qualified && hp > 0)
+	if (out.executioner_qualified && primary_alive_after_base)
 	{
 		out.executioner_damage = percentage_of(input.base_damage, kExecutionerBonusPct);
-		out.executioner_applied = out.executioner_damage > 0;
-		hp = apply_to_hp(hp, out.executioner_damage);
 	}
 
 	// Tempo advances once per successful swing, not once per target.
@@ -166,11 +189,9 @@ SwingResult resolve_accepted_swing(State& state, const SwingInput& input)
 			{
 				state.tempo_chain = 0;
 				out.tempo_proc = true;
-				if (input.has_primary && hp > 0)
+				if (primary_alive_after_base)
 				{
 					out.tempo_damage = percentage_of(input.base_damage, kTempoBonusPct);
-					out.tempo_applied = out.tempo_damage > 0;
-					hp = apply_to_hp(hp, out.tempo_damage);
 				}
 			}
 		}
@@ -191,15 +212,13 @@ SwingResult resolve_accepted_swing(State& state, const SwingInput& input)
 		state.counter_active = false;
 		state.counter_expires_at_ms = 0;
 		out.counter_consumed = true;
-		if (input.has_primary && hp > 0)
+		if (primary_alive_after_base)
 		{
 			out.bulwark_damage = percentage_of(input.base_damage, kBulwarkBonusPct);
-			out.bulwark_applied = out.bulwark_damage > 0;
-			hp = apply_to_hp(hp, out.bulwark_damage);
 		}
 		if (bulwark_rank >= 2)
 		{
-			out.heal = kBulwarkRank2Heal;
+			out.heal_request = kBulwarkRank2Heal;
 		}
 	}
 	else if (bulwark_rank == 0)
@@ -208,16 +227,32 @@ SwingResult resolve_accepted_swing(State& state, const SwingInput& input)
 		state.counter_expires_at_ms = 0;
 	}
 
-	// Executioner rank-2 observes death at the end of the full E -> T -> B transaction.
-	if (executioner_rank >= 2 && out.executioner_qualified && input.has_primary && hp <= 0)
+	out.tempo_chain_after = state.tempo_chain;
+	return out;
+}
+
+SwingResult reconcile_accepted_swing(const SwingPlan& plan, const SwingActual& actual)
+{
+	SwingResult out;
+	out.executioner_damage = plan.executioner_damage;
+	out.tempo_damage = plan.tempo_damage;
+	out.bulwark_damage = plan.bulwark_damage;
+	out.heal = plan.heal_request;
+	out.primary_hp_after_synergies = std::max(0, actual.primary_pool_after);
+	out.tempo_chain_after = plan.tempo_chain_after;
+	out.executioner_qualified = plan.executioner_qualified;
+	out.tempo_proc = plan.tempo_proc;
+	out.tempo_reset_by_miss = plan.tempo_reset_by_miss;
+	out.counter_consumed = plan.counter_consumed;
+	out.executioner_applied = actual.executioner_damage > 0;
+	out.tempo_applied = actual.tempo_damage > 0;
+	out.bulwark_applied = actual.bulwark_damage > 0;
+	if (plan.executioner_rank >= 2 && plan.executioner_qualified && actual.primary_dead_after)
 	{
 		out.cooldown_refund_ms = std::min(
-			std::max(0, input.attack_cooldown_ms),
-			percentage_of(std::max(0, input.attack_cooldown_ms), kExecutionerRefundPct));
+			plan.attack_cooldown_ms,
+			percentage_of(plan.attack_cooldown_ms, kExecutionerRefundPct));
 	}
-
-	out.primary_hp_after_synergies = hp;
-	out.tempo_chain_after = state.tempo_chain;
 	return out;
 }
 }

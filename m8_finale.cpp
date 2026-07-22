@@ -22,18 +22,48 @@ namespace
 	}
 }
 
-int guard_for_resolve(int resolve_tokens)
+bool validate_profile(const Profile& profile)
 {
-	const int bounded = std::max(0, std::min(2, resolve_tokens));
-	return std::max(kMinimumGuard, kBaseGuard - kGuardReductionPerResolve * bounded);
+	return profile.base_guard > 0
+		&& profile.guard_reduction_per_resolve >= 0
+		&& profile.minimum_guard > 0
+		&& profile.base_guard >= profile.minimum_guard
+		&& profile.stagger_ms > 0
+		&& profile.stagger_damage_pct >= 100
+		&& profile.base_guard - 2 * profile.guard_reduction_per_resolve
+			>= profile.minimum_guard;
 }
 
-void configure(State& state, int resolve_tokens)
+int guard_for_resolve(int resolve_tokens, const Profile& profile)
 {
+	if (!validate_profile(profile))
+	{
+		return 0;
+	}
+	const int bounded = std::max(0, std::min(2, resolve_tokens));
+	return std::max(profile.minimum_guard,
+		profile.base_guard - profile.guard_reduction_per_resolve * bounded);
+}
+
+bool configure(State& state, int resolve_tokens, const Profile& profile)
+{
+	reset(state);
+	if (!validate_profile(profile))
+	{
+		return false;
+	}
 	state.configured = true;
-	state.max_guard = guard_for_resolve(resolve_tokens);
+	state.max_guard = guard_for_resolve(resolve_tokens, profile);
 	state.guard = state.max_guard;
 	state.guard_broken_at_ms = -1;
+	state.stagger_ms = profile.stagger_ms;
+	state.stagger_damage_pct = profile.stagger_damage_pct;
+	return true;
+}
+
+void reset(State& state)
+{
+	state = State{};
 }
 
 Phase phase(const State& state, int current_hp, std::int64_t now_ms)
@@ -51,7 +81,7 @@ Phase phase(const State& state, int current_hp, std::int64_t now_ms)
 		return Phase::Guarded;
 	}
 	if (state.guard_broken_at_ms >= 0
-		&& now_ms <= state.guard_broken_at_ms + kStaggerMs)
+		&& now_ms <= state.guard_broken_at_ms + state.stagger_ms)
 	{
 		return Phase::Staggered;
 	}
@@ -103,7 +133,7 @@ DamageResult apply_damage(State& state, int current_hp, int amount, std::int64_t
 
 	if (phase(state, current_hp, now_ms) == Phase::Staggered)
 	{
-		out.multiplier_pct = kStaggerDamagePct;
+		out.multiplier_pct = state.stagger_damage_pct;
 	}
 	out.hp_damage = std::min(out.hp_after, percentage_of(amount, out.multiplier_pct));
 	out.hp_after -= out.hp_damage;
@@ -146,5 +176,30 @@ std::size_t select_warden(const std::vector<Candidate>& candidates, int farthest
 		}
 	}
 	return best;
+}
+
+bool validate_candidates(
+	const std::vector<Candidate>& candidates, std::size_t expected_count, int room_count)
+{
+	if (expected_count == 0 || candidates.size() != expected_count || room_count <= 1)
+	{
+		return false;
+	}
+	std::vector<std::uint32_t> ordinals;
+	ordinals.reserve(candidates.size());
+	for (const Candidate& candidate : candidates)
+	{
+		if (!candidate.spawned || candidate.start_room
+			|| candidate.room_index < 0 || candidate.room_index >= room_count)
+		{
+			return false;
+		}
+		if (std::find(ordinals.begin(), ordinals.end(), candidate.spawn_ordinal) != ordinals.end())
+		{
+			return false;
+		}
+		ordinals.push_back(candidate.spawn_ordinal);
+	}
+	return true;
 }
 }

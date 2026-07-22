@@ -119,6 +119,19 @@ namespace
 		return nullptr;
 	}
 
+	const TCHAR* WardenPhaseName(EUegameWardenPhase Phase)
+	{
+		switch (Phase)
+		{
+		case EUegameWardenPhase::Guarded: return TEXT("GUARDED");
+		case EUegameWardenPhase::Staggered: return TEXT("BROKEN - STRIKE NOW");
+		case EUegameWardenPhase::Exposed: return TEXT("EXPOSED");
+		case EUegameWardenPhase::Dead: return TEXT("DEFEATED");
+		case EUegameWardenPhase::Inactive:
+		default: return TEXT("INACTIVE");
+		}
+	}
+
 	// Objective routing has stricter authority than the legacy readout: exactly one current
 	// encounter snapshot must match the active run and floor. Ambiguity clears the arrow.
 	ADungeonSpawner* FindFreshObjectiveSpawner(UWorld* World, const UUegameFloorManager* FM)
@@ -189,6 +202,10 @@ namespace
 		AActor* LockedTarget, uint64 LockedRunSeed, int32 LockedFloorIndex, uint32 LockedSpawnerKey,
 		int32 AuthorityFaultMode)
 	{
+		if (FM && FM->GetRunState() != m8authority::RunState::Playing)
+		{
+			return { { FString::Printf(TEXT("OBJECTIVE: %s"), RunStateName(FM->GetRunState())), kDim } };
+		}
 		if (FM && FM->IsRoomContractPending())
 		{
 			return { { TEXT("OBJECTIVE: CHOOSE ROOM CONTRACT [1/2]"), kAccent } };
@@ -228,9 +245,26 @@ namespace
 			return { { TEXT("OBJECTIVE: EXIT READY - STAIRS UNAVAILABLE"), kDim } };
 		}
 
+		const bool bPrioritizeOrdinary = Spawner->HasFinaleInitialized()
+			&& Spawner->GetLivingOrdinaryEnemyCount() > 0;
+		TSet<int32> OrdinaryRooms;
+		if (bPrioritizeOrdinary)
+		{
+			for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+			{
+				ADungeonEnemy* Enemy = *It;
+				if (IsValid(Enemy) && !Enemy->IsActorBeingDestroyed() && Enemy->IsActiveThreat()
+					&& Enemy->GetOwningSpawner() == Spawner && !Enemy->IsWarden())
+				{
+					OrdinaryRooms.Add(Enemy->GetRoomIndex());
+				}
+			}
+		}
+
 		// A chosen contract room is the first tactical commitment while it still has threats.
 		int32 ObjectiveRoom = FM->GetSelectedContractRoom();
-		if (ObjectiveRoom < 0 || Spawner->GetAliveInRoom(ObjectiveRoom) <= 0)
+		if (ObjectiveRoom < 0 || Spawner->GetAliveInRoom(ObjectiveRoom) <= 0
+			|| (bPrioritizeOrdinary && !OrdinaryRooms.Contains(ObjectiveRoom)))
 		{
 			ObjectiveRoom = INDEX_NONE;
 			int32 BestRisk = TNumericLimits<int32>::Max();
@@ -238,7 +272,8 @@ namespace
 			const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
 			for (int32 Room = 0; Room < Spawner->GetRoomCount(); ++Room)
 			{
-				if (Spawner->GetAliveInRoom(Room) <= 0 || !Roles.IsValidIndex(Room))
+				if (Spawner->GetAliveInRoom(Room) <= 0 || !Roles.IsValidIndex(Room)
+					|| (bPrioritizeOrdinary && !OrdinaryRooms.Contains(Room)))
 				{
 					continue;
 				}
@@ -262,7 +297,8 @@ namespace
 		{
 			ADungeonEnemy* Enemy = *It;
 			if (!IsValid(Enemy) || Enemy->IsActorBeingDestroyed() || !Enemy->IsActiveThreat()
-				|| Enemy->GetOwningSpawner() != Spawner || Enemy->GetRoomIndex() != ObjectiveRoom)
+				|| Enemy->GetOwningSpawner() != Spawner || Enemy->GetRoomIndex() != ObjectiveRoom
+				|| (bPrioritizeOrdinary && Enemy->IsWarden()))
 			{
 				continue;
 			}
@@ -741,6 +777,11 @@ void AUegameHUD::DrawHUD()
 			: TEXT("Bulwark     --"),
 			Synergy->IsCounterReady() ? kAccent : (B > 0 ? kBody : kDim) });
 	}
+	if (FM && FM->IsRunActive())
+	{
+		Left.Add({ FString::Printf(TEXT("Resolve     %d / 2  (-30 Warden Guard each)"),
+			FM->GetResolveTokens()), FM->GetResolveTokens() > 0 ? kAccent : kDim });
+	}
 	DrawPanel(this, Font, 24.0f, 24.0f, Left, Scale);
 
 	// ---------------- Right panel: run / floor / room role / encounter tally ----------------
@@ -752,6 +793,8 @@ void AUegameHUD::DrawHUD()
 		Right.Add({ FString::Printf(TEXT("Floor %d    seed 0x%llx"),
 			FM->GetFloorIndex(), static_cast<unsigned long long>(FM->GetRunSeed())), kBody });
 		Right.Add({ FString::Printf(TEXT("State      %s"), RunStateName(FM->GetRunState())), kBody });
+		Right.Add({ FString::Printf(TEXT("Resolve    %d / 2"), FM->GetResolveTokens()),
+			FM->GetResolveTokens() > 0 ? kAccent : kDim });
 		if (FM->IsRoomContractPending())
 		{
 			Right.Add({ FString::Printf(TEXT("Contract   CHOOSE  Secure R%d / Challenge R%d"),
@@ -763,7 +806,7 @@ void AUegameHUD::DrawHUD()
 		}
 		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Challenge)
 		{
-			Right.Add({ FString::Printf(TEXT("Contract   CHALLENGE R%d  +50%% HP on clear"), FM->GetSelectedContractRoom()), kAccent });
+			Right.Add({ FString::Printf(TEXT("Contract   CHALLENGE R%d  +50%% HP +1 Resolve on clear"), FM->GetSelectedContractRoom()), kAccent });
 		}
 		Right.Add({ FString::Printf(TEXT("Rooms      %d / %d required  (%d total)"),
 			FM->GetClearedCombatRooms(), FM->GetRequiredCombatRooms(), FM->GetActualCombatRooms()), kBody });
@@ -811,6 +854,23 @@ void AUegameHUD::DrawHUD()
 			Right.Add({ FString::Printf(TEXT("Enemies    Grunt %d  Runner %d  Brute %d"), T.X, T.Y, T.Z), kBody });
 			Right.Add({ FString::Printf(TEXT("typeHash   0x%llx"),
 				static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+			if (Spawner->HasFinaleInitialized())
+			{
+				if (const ADungeonEnemy* Warden = Spawner->GetWarden())
+				{
+					const bool bGuarded = Warden->GetWardenPhase() == EUegameWardenPhase::Guarded;
+					Right.Add({ FString::Printf(TEXT("WARDEN    %s  %s %d/%d"),
+						WardenPhaseName(Warden->GetWardenPhase()),
+						bGuarded ? TEXT("Guard") : TEXT("HP"),
+						Warden->GetCombatPoolCurrent(), Warden->GetCombatPoolMax()), kAccent });
+					Right.Add({ FString::Printf(TEXT("Finale     ordinary threats %d"),
+						Spawner->GetLivingOrdinaryEnemyCount()), kBody });
+				}
+				else if (Spawner->IsWardenDefeated())
+				{
+					Right.Add({ TEXT("WARDEN    DEFEATED"), kAccent });
+				}
+			}
 		}
 	}
 	else
@@ -908,7 +968,7 @@ void AUegameHUD::DrawHUD()
 			Center.Add({ TEXT("ROOM CONTRACT"), kAccent });
 			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  +25%% HP NOW"),
 				FM->GetSecureContractRoom()), kBody });
-			Center.Add({ FString::Printf(TEXT("[2] CHALLENGE R%d  Stronger threats, +50%% HP AFTER CLEAR"),
+			Center.Add({ FString::Printf(TEXT("[2] CHALLENGE R%d  Stronger threats, +50%% HP +1 RESOLVE AFTER CLEAR"),
 				FM->GetChallengeContractRoom()), kAccent });
 			Center.Add({ TEXT("Choose 1 or 2 to begin this floor"), kDim });
 		}
@@ -1080,10 +1140,19 @@ void AUegameHUD::DrawHUD()
 			continue;
 		}
 
-		// Nameplate text: "<Grunt|Runner|Brute|Enemy> cur/max". Unassigned enemies (no M6
+		// Nameplate text reads the authoritative combat pool: Warden guard while guarded, HP after.
+		// Unassigned enemies (no M6
 		// assignment: static spawners, unavailable tables) read dim + neutral - never "Grunt".
-		const FString Label = FString::Printf(TEXT("%s %.0f/%.0f"),
-			C.Enemy->GetArchetypeDisplayName(), HC->GetHP(), HC->GetMaxHP());
+		const int32 PoolCurrent = C.Enemy->GetCombatPoolCurrent();
+		const int32 PoolMax = C.Enemy->GetCombatPoolMax();
+		const bool bWardenGuard = C.Enemy->IsWarden()
+			&& C.Enemy->GetWardenPhase() == EUegameWardenPhase::Guarded;
+		const FString Label = C.Enemy->IsWarden()
+			? FString::Printf(TEXT("WARDEN [%s] %s %d/%d"),
+				WardenPhaseName(C.Enemy->GetWardenPhase()),
+				bWardenGuard ? TEXT("Guard") : TEXT("HP"), PoolCurrent, PoolMax)
+			: FString::Printf(TEXT("%s %d/%d"),
+				C.Enemy->GetArchetypeDisplayName(), PoolCurrent, PoolMax);
 		float TextW = 0.0f, TextH = 0.0f;
 		GetTextSize(Label, TextW, TextH, Font, EScale);
 
@@ -1104,7 +1173,9 @@ void AUegameHUD::DrawHUD()
 			X + 0.5f * (BlockW - TextW), Y + PadY, Font, EScale, /*bScalePosition=*/false);
 
 		// HP bar: fixed screen-space size, live ratio, UI-space color by remaining fraction.
-		const float Ratio = FMath::Clamp(HC->GetHP() / FMath::Max(HC->GetMaxHP(), 1.0f), 0.0f, 1.0f);
+		const float Ratio = FMath::Clamp(
+			static_cast<float>(PoolCurrent) / FMath::Max(static_cast<float>(PoolMax), 1.0f),
+			0.0f, 1.0f);
 		const FLinearColor Fill = (Ratio > 0.5f) ? kHpGood : (Ratio > 0.25f ? kAccent : kHpBad);
 		const float BarX = static_cast<float>(Proj.X) - 0.5f * BarW;
 		const float BarY = Y + PadY + TextH + Gap;

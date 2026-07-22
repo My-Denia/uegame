@@ -15,6 +15,16 @@
 #include "DungeonSpawner.generated.h"
 
 class UInstancedStaticMeshComponent;
+class ADungeonEnemy;
+struct FCombatConfigRow;
+
+enum class EUegameFinaleInitState : uint8
+{
+	NotRequired = 0,
+	Pending,
+	Succeeded,
+	Failed
+};
 
 struct FFloorExitNeutralizationResult
 {
@@ -125,7 +135,16 @@ public:
 	// --- M3 room-clear tracking (evidence surface) ---
 
 	/** Enemy death callback; logs [RoomClear] when a room's alive count reaches zero. */
-	void NotifyEnemyDead(int32 InRoomIndex);
+	void NotifyEnemyDead(ADungeonEnemy* Enemy);
+
+	/** Promote one frozen final-floor spawn to a fixed-profile Warden without changing identity. */
+	bool InitializeFinale(const FCombatConfigRow& Row, int32 ResolveTokens);
+	EUegameFinaleInitState GetFinaleInitState() const { return FinaleInitState; }
+	bool HasFinaleInitialized() const { return FinaleInitState == EUegameFinaleInitState::Succeeded; }
+	bool HasFinaleFailed() const { return FinaleInitState == EUegameFinaleInitState::Failed; }
+	bool IsWardenDefeated() const { return bWardenDefeated; }
+	ADungeonEnemy* GetWarden() const { return WardenEnemy.Get(); }
+	int32 GetLivingOrdinaryEnemyCount() const;
 
 	/** Atomically make every live enemy owned by this spawner harmless before progression. */
 	FFloorExitNeutralizationResult DeactivateRemainingEnemiesForExit(int32 InFloorIndex);
@@ -139,6 +158,11 @@ public:
 	}
 	/** 0=none, 1=stale preflight, 2=partial apply followed by required rollback. */
 	void SetChallengeContractFailureModeForTests(int32 Mode) { ChallengeContractFailureModeForTests = Mode; }
+	/** One-shot finale init seam: 1=missing, 2=duplicate, 3=mismatch, 4=partial rollback, 5=invalid profile. */
+	void SetFinaleInitFailureModeForTests(int32 Mode)
+	{
+		FinaleInitFailureModeForTests = FMath::Clamp(Mode, 0, 5);
+	}
 	/** Evidence-only cache staging for isolated callback validation; caller must restore it. */
 	bool SetRoomAliveCountForTests(int32 RoomIndex, int32 Alive)
 	{
@@ -227,6 +251,7 @@ private:
 	/** Mark the whole map dirty so the dynamic navmesh rebuilds (M2 pattern, factored
 	 *  out so floor transitions can reuse it). */
 	void RefreshNavigation();
+	void ResetFinaleState();
 
 	/** M4: 64-bit runtime seed (floor seeds exceed int32). */
 	uint64 Seed64 = 0;
@@ -261,6 +286,12 @@ private:
 	/** M3 per-room enemy bookkeeping; written by SpawnEnemies(). */
 	TArray<int32> RoomAliveCounts;
 	TArray<int32> RoomInitialCounts;
+	TArray<TWeakObjectPtr<ADungeonEnemy>> SpawnedEnemyActors;
+	TArray<int32> LastPlannedRooms;
+	int32 LastPlannedEnemyCount = 0;
+	EUegameFinaleInitState FinaleInitState = EUegameFinaleInitState::NotRequired;
+	TWeakObjectPtr<ADungeonEnemy> WardenEnemy;
+	bool bWardenDefeated = false;
 
 	// --- M6B encounter cache backing fields (see public accessors above) ---
 	bool bEncounterAssigned = false;
@@ -277,5 +308,6 @@ private:
 #if !UE_BUILD_SHIPPING
 	int32 ExitWithdrawalFailureModeForTests = 0;
 	int32 ChallengeContractFailureModeForTests = 0;
+	int32 FinaleInitFailureModeForTests = 0;
 #endif
 };

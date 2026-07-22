@@ -27,6 +27,7 @@
 
 #include "m8_room_contract.hpp"
 #include "m8_enemy_behavior.hpp"
+#include "m8_finale.hpp"
 
 namespace
 {
@@ -36,6 +37,9 @@ namespace
 	const FLinearColor kRunnerCircleColor(0.05f, 0.55f, 0.95f);
 	const FLinearColor kRunnerDashColor(0.85f, 0.08f, 0.85f);
 	const FLinearColor kRecoveryColor(0.22f, 0.22f, 0.26f);
+	const FLinearColor kWardenGuardColor(0.12f, 0.30f, 0.85f);
+	const FLinearColor kWardenBrokenColor(1.0f, 0.78f, 0.05f);
+	const FLinearColor kWardenExposedColor(0.72f, 0.02f, 0.02f);
 	constexpr float kHitFlashSeconds = 0.12f;
 	constexpr float kBehaviorTickSeconds = 0.05f;
 	constexpr float kBehaviorPulseSeconds = 0.18f;
@@ -44,6 +48,19 @@ namespace
 	m8enemy::Archetype BehaviorArchetype(int32 TypeId)
 	{
 		return m8enemy::clamp_archetype(TypeId);
+	}
+
+	EUegameWardenPhase ToUeWardenPhase(m8finale::Phase Phase)
+	{
+		switch (Phase)
+		{
+		case m8finale::Phase::Guarded: return EUegameWardenPhase::Guarded;
+		case m8finale::Phase::Staggered: return EUegameWardenPhase::Staggered;
+		case m8finale::Phase::Exposed: return EUegameWardenPhase::Exposed;
+		case m8finale::Phase::Dead: return EUegameWardenPhase::Dead;
+		case m8finale::Phase::Inactive:
+		default: return EUegameWardenPhase::Inactive;
+		}
 	}
 
 	const TCHAR* BehaviorLabel(m8enemy::Phase Phase, m8enemy::Archetype /*Archetype*/)
@@ -125,6 +142,7 @@ ADungeonEnemy::ADungeonEnemy()
 
 void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, ADungeonSpawner* InSpawner)
 {
+	ResetWardenState();
 	RoomIndex = InRoomIndex;
 	SpawnOrdinal = INDEX_NONE;
 	SpawnerRef = InSpawner;
@@ -138,6 +156,7 @@ void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, AD
 	PreChallengeDurationDenominator = 1;
 	BehaviorDurationNumerator = 1;
 	BehaviorDurationDenominator = 1;
+	AssignedContactDamage = Row.EnemyContactDamage;
 	ContactDamage = Row.EnemyContactDamage;
 	DamageInterval = Row.EnemyDamageInterval;
 	AggroRange = Row.AggroRange;
@@ -158,6 +177,7 @@ void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float 
 	// base HP re-applies the M4 per-floor multiplier so floor scaling semantics are preserved
 	// (Grunt: arch == Default, so hp == the pre-M6 EffHP exactly).
 	const float EffHP = Stats.MaxHP * InHpMult;
+	AssignedContactDamage = Stats.ContactDamage;
 	ContactDamage = static_cast<float>(m8enemy::scale_contact_damage(
 		FMath::RoundToInt(Stats.ContactDamage)));
 	DamageInterval = Stats.DamageInterval;
@@ -189,8 +209,112 @@ void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float 
 		S, GetCapsuleComponent()->GetScaledCapsuleRadius(), ContactRange, ContactDamage);
 }
 
+bool ADungeonEnemy::ConfigureAsWarden(const FCombatConfigRow& Row, int32 ResolveTokens)
+{
+	if (bWarden || bRoomChallengeModified || !Health || Health->IsDead()
+		|| !GetCharacterMovement() || !BodyMesh || !FUegameCombatConfig::IsFromDataTable())
+	{
+		return false;
+	}
+	m8finale::Profile Profile;
+	Profile.base_guard = Row.WardenBaseGuard;
+	Profile.guard_reduction_per_resolve = Row.WardenGuardReductionPerResolve;
+	Profile.minimum_guard = Row.WardenMinimumGuard;
+	Profile.stagger_ms = FMath::RoundToInt64(Row.WardenStaggerSeconds * 1000.0f);
+	Profile.stagger_damage_pct = FMath::RoundToInt(Row.WardenStaggerDamageMultiplier * 100.0f);
+	m8finale::State NewState;
+	if (!m8finale::configure(NewState, ResolveTokens, Profile)
+		|| !FMath::IsFinite(Row.WardenMaxHP) || Row.WardenMaxHP <= 0.0f
+		|| !FMath::IsFinite(Row.WardenMoveSpeed) || Row.WardenMoveSpeed <= 0.0f
+		|| !FMath::IsFinite(Row.WardenContactDamage) || Row.WardenContactDamage <= 0.0f
+		|| !FMath::IsFinite(Row.WardenDamageInterval) || Row.WardenDamageInterval <= 0.0f
+		|| !FMath::IsFinite(Row.WardenAggroRange) || Row.WardenAggroRange <= 0.0f
+		|| !FMath::IsFinite(Row.WardenLeashRange) || Row.WardenLeashRange <= Row.WardenAggroRange
+		|| !FMath::IsFinite(Row.WardenMeshScale)
+		|| Row.WardenMeshScale < 1.0f || Row.WardenMeshScale > 3.0f)
+	{
+		return false;
+	}
+
+	const float OldMaxHP = Health->GetMaxHP();
+	const float OldHP = Health->GetHP();
+	const float OldAssignedDamage = AssignedContactDamage;
+	const float OldContactDamage = ContactDamage;
+	const float OldDamageInterval = DamageInterval;
+	const float OldAggroRange = AggroRange;
+	const float OldLeashRange = LeashRange;
+	const float OldBaseMoveSpeed = BaseMoveSpeed;
+	const FVector OldMeshScale = BodyMesh->GetRelativeScale3D();
+	const FVector OldMeshLocation = BodyMesh->GetRelativeLocation();
+
+	AssignedContactDamage = Row.WardenContactDamage;
+	ContactDamage = static_cast<float>(m8enemy::scale_contact_damage(
+		FMath::RoundToInt(Row.WardenContactDamage)));
+	DamageInterval = Row.WardenDamageInterval;
+	AggroRange = Row.WardenAggroRange;
+	LeashRange = Row.WardenLeashRange;
+	BaseMoveSpeed = Row.WardenMoveSpeed;
+	GetCharacterMovement()->MaxWalkSpeed = BaseMoveSpeed;
+	Health->Init(Row.WardenMaxHP);
+	BodyMesh->SetRelativeScale3D(FVector(
+		0.68f * Row.WardenMeshScale,
+		0.68f * Row.WardenMeshScale,
+		1.76f * Row.WardenMeshScale));
+	BodyMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 88.0f * (Row.WardenMeshScale - 1.0f)));
+
+	bool bForcedFailure = false;
+#if !UE_BUILD_SHIPPING
+	bForcedFailure = WardenConfigFaultModeForTests == 1;
+	WardenConfigFaultModeForTests = 0;
+#endif
+	if (bForcedFailure)
+	{
+		AssignedContactDamage = OldAssignedDamage;
+		ContactDamage = OldContactDamage;
+		DamageInterval = OldDamageInterval;
+		AggroRange = OldAggroRange;
+		LeashRange = OldLeashRange;
+		BaseMoveSpeed = OldBaseMoveSpeed;
+		GetCharacterMovement()->MaxWalkSpeed = BaseMoveSpeed;
+		Health->Init(OldMaxHP);
+		Health->SetHP(OldHP);
+		BodyMesh->SetRelativeScale3D(OldMeshScale);
+		BodyMesh->SetRelativeLocation(OldMeshLocation);
+		ResetWardenState();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[WardenInit] rollback=true room=%d ordinal=%d sourceType=%d"),
+			RoomIndex, SpawnOrdinal, ArchetypeTypeId);
+		return false;
+	}
+
+	bWarden = true;
+	WardenMaxGuard = NewState.max_guard;
+	WardenGuard = NewState.guard;
+	WardenGuardBrokenAtMs = NewState.guard_broken_at_ms;
+	WardenStaggerMs = NewState.stagger_ms;
+	WardenStaggerDamagePct = NewState.stagger_damage_pct;
+	bWardenExposureInitialized = false;
+	bPendingCommittedHit = false;
+	PendingCommittedHitRange = 0.0f;
+	bChasing = false;
+	LastContactDamageTime = -1000.0;
+	ResetBehaviorState(false);
+	ApplyBehaviorPresentation();
+	UE_LOG(LogTemp, Display,
+		TEXT("[WardenInit] committed=true room=%d ordinal=%d sourceType=%d resolve=%d hp=%.0f speed=%.0f assignedDamage=%.0f committedDamage=%.0f interval=%.2f aggro=%.0f leash=%.0f meshScale=%.2f guard=%d staggerMs=%lld damagePct=%d"),
+		RoomIndex, SpawnOrdinal, ArchetypeTypeId, FMath::Clamp(ResolveTokens, 0, 2),
+		Health->GetMaxHP(), BaseMoveSpeed, AssignedContactDamage, ContactDamage,
+		DamageInterval, AggroRange, LeashRange, Row.WardenMeshScale,
+		WardenGuard, static_cast<long long>(WardenStaggerMs), WardenStaggerDamagePct);
+	return true;
+}
+
 const TCHAR* ADungeonEnemy::GetArchetypeDisplayName() const
 {
+	if (bWarden)
+	{
+		return TEXT("WARDEN");
+	}
 	// Owner ruling (M7A.2): unassigned reads as neutral "Enemy" - never "Grunt" (a lie about
 	// the no-assignment path) and not "Default" (implementation vocabulary, not player-facing).
 	return HasArchetypeAssignment()
@@ -245,6 +369,43 @@ void ADungeonEnemy::BeginPlay()
 		kBehaviorTickSeconds, true, kBehaviorTickSeconds);
 }
 
+void ADungeonEnemy::ResetWardenState()
+{
+	bWarden = false;
+	WardenMaxGuard = 0;
+	WardenGuard = 0;
+	WardenGuardBrokenAtMs = -1;
+	WardenStaggerMs = 0;
+	WardenStaggerDamagePct = 100;
+	bWardenExposureInitialized = false;
+#if !UE_BUILD_SHIPPING
+	WardenConfigFaultModeForTests = 0;
+#endif
+}
+
+EUegameWardenPhase ADungeonEnemy::GetWardenPhase() const
+{
+	if (!bWarden)
+	{
+		return EUegameWardenPhase::Inactive;
+	}
+	m8finale::State State;
+	State.configured = true;
+	State.max_guard = WardenMaxGuard;
+	State.guard = WardenGuard;
+	State.guard_broken_at_ms = WardenGuardBrokenAtMs;
+	State.stagger_ms = WardenStaggerMs;
+	State.stagger_damage_pct = WardenStaggerDamagePct;
+	const int32 CurrentHP = Health ? FMath::RoundToInt(Health->GetHP()) : 0;
+	return ToUeWardenPhase(m8finale::phase(State, CurrentHP, GetBehaviorNowMs()));
+}
+
+int32 ADungeonEnemy::GetPlayerDamageMultiplierPercent() const
+{
+	return GetWardenPhase() == EUegameWardenPhase::Staggered
+		? WardenStaggerDamagePct : 100;
+}
+
 void ADungeonEnemy::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	UE_LOG(LogTemp, Display,
@@ -268,7 +429,7 @@ int64 ADungeonEnemy::GetBehaviorNowMs() const
 void ADungeonEnemy::ResetBehaviorState(bool bDead)
 {
 	m8enemy::State State;
-	m8enemy::initialize(State, BehaviorArchetype(ArchetypeTypeId),
+	m8enemy::initialize(State, BehaviorArchetype(bWarden ? 2 : ArchetypeTypeId),
 		static_cast<uint32>(FMath::Max(0, SpawnOrdinal)), GetBehaviorNowMs());
 	if (bDead)
 	{
@@ -292,19 +453,46 @@ void ADungeonEnemy::ResetBehaviorState(bool bDead)
 void ADungeonEnemy::ApplyBehaviorPresentation()
 {
 	const m8enemy::Phase Phase = static_cast<m8enemy::Phase>(BehaviorPhase);
+	FLinearColor RestingColor = BehaviorColor(Phase);
 	if (BehaviorText)
 	{
-		FString Label(BehaviorLabel(Phase, BehaviorArchetype(ArchetypeTypeId)));
-		if (bRoomChallengeModified && Phase != m8enemy::Phase::Dead)
+		FString Label(BehaviorLabel(Phase, BehaviorArchetype(bWarden ? 2 : ArchetypeTypeId)));
+		if (bWarden)
+		{
+			switch (GetWardenPhase())
+			{
+			case EUegameWardenPhase::Guarded:
+				Label = Label.IsEmpty()
+					? FString::Printf(TEXT("WARDEN GUARD %d"), WardenGuard)
+					: FString::Printf(TEXT("WARDEN GUARD %d | SLAM"), WardenGuard);
+				RestingColor = kWardenGuardColor;
+				break;
+			case EUegameWardenPhase::Staggered:
+				Label = TEXT("WARDEN BROKEN - STRIKE NOW");
+				RestingColor = kWardenBrokenColor;
+				break;
+			case EUegameWardenPhase::Exposed:
+				Label = Label.IsEmpty() ? TEXT("WARDEN EXPOSED") : TEXT("WARDEN SLAM 0.90");
+				RestingColor = kWardenExposedColor;
+				break;
+			case EUegameWardenPhase::Dead:
+				Label.Reset();
+				break;
+			case EUegameWardenPhase::Inactive:
+			default:
+				break;
+			}
+		}
+		else if (bRoomChallengeModified && Phase != m8enemy::Phase::Dead)
 		{
 			Label = Label.IsEmpty() ? TEXT("CHALLENGE") : Label + TEXT(" | CHALLENGE");
 		}
 		BehaviorText->SetText(FText::FromString(Label));
-		BehaviorText->SetTextRenderColor(BehaviorColor(Phase).ToFColor(true));
+		BehaviorText->SetTextRenderColor(RestingColor.ToFColor(true));
 	}
 	if (BodyMID)
 	{
-		BodyMID->SetVectorParameterValue(TEXT("Color"), BehaviorColor(Phase));
+		BodyMID->SetVectorParameterValue(TEXT("Color"), RestingColor);
 	}
 }
 
@@ -330,9 +518,33 @@ void ADungeonEnemy::BehaviorTick()
 		bPendingCommittedHit = false;
 		return;
 	}
+	if (bWarden)
+	{
+		const EUegameWardenPhase WardenPhase = GetWardenPhase();
+		if (WardenPhase == EUegameWardenPhase::Staggered)
+		{
+			bPendingCommittedHit = false;
+			PendingCommittedHitRange = 0.0f;
+			if (AAIController* AI = Cast<AAIController>(GetController()))
+			{
+				AI->StopMovement();
+			}
+			GetCharacterMovement()->MaxWalkSpeed = 0.0f;
+			ApplyBehaviorPresentation();
+			return;
+		}
+		if (WardenPhase == EUegameWardenPhase::Exposed && !bWardenExposureInitialized)
+		{
+			bWardenExposureInitialized = true;
+			ResetBehaviorState(false);
+			UE_LOG(LogTemp, Display,
+				TEXT("[WardenPhase] room=%d ordinal=%d phase=Exposed behavior=BruteApproach"),
+				RoomIndex, SpawnOrdinal);
+		}
+	}
 
 	m8enemy::State State;
-	State.archetype = BehaviorArchetype(ArchetypeTypeId);
+	State.archetype = BehaviorArchetype(bWarden ? 2 : ArchetypeTypeId);
 	State.phase = static_cast<m8enemy::Phase>(BehaviorPhase);
 	State.phase_started_ms = BehaviorPhaseStartedMs;
 	State.spawn_ordinal = static_cast<uint32>(FMath::Max(0, SpawnOrdinal));
@@ -548,6 +760,16 @@ void ADungeonEnemy::PursueTick()
 		}
 		return;
 	}
+	if (bWarden && GetWardenPhase() == EUegameWardenPhase::Staggered)
+	{
+		bPendingCommittedHit = false;
+		PendingCommittedHitRange = 0.0f;
+		if (AAIController* AI = Cast<AAIController>(GetController()))
+		{
+			AI->StopMovement();
+		}
+		return;
+	}
 
 	AAIController* AI = Cast<AAIController>(GetController());
 	const float Dist = FVector::Dist2D(GetActorLocation(), Player->GetActorLocation());
@@ -682,7 +904,7 @@ void ADungeonEnemy::RunBehaviorContractProbeForTests(int32 Mode)
 		}
 	}
 	const int64 NowMs = GetBehaviorNowMs();
-	const m8enemy::Archetype Archetype = BehaviorArchetype(ArchetypeTypeId);
+	const m8enemy::Archetype Archetype = BehaviorArchetype(bWarden ? 2 : ArchetypeTypeId);
 	if (Mode == 7 || Mode == 8)
 	{
 		bPendingCommittedHit = true;
@@ -762,11 +984,19 @@ bool ADungeonEnemy::IsActiveThreat() const
 
 int32 ADungeonEnemy::GetCombatPoolCurrent() const
 {
+	if (bWarden && WardenGuard > 0)
+	{
+		return WardenGuard;
+	}
 	return Health ? FMath::Max(0, FMath::RoundToInt(Health->GetHP())) : 0;
 }
 
 int32 ADungeonEnemy::GetCombatPoolMax() const
 {
+	if (bWarden && WardenGuard > 0)
+	{
+		return FMath::Max(1, WardenMaxGuard);
+	}
 	return Health ? FMath::Max(1, FMath::RoundToInt(Health->GetMaxHP())) : 1;
 }
 
@@ -776,14 +1006,62 @@ int32 ADungeonEnemy::ApplyPlayerDamage(int32 Amount, AActor* DamageInstigator)
 	{
 		return 0;
 	}
-	const int32 Before = GetCombatPoolCurrent();
-	Health->TakeDamage(static_cast<float>(Amount), DamageInstigator);
-	return FMath::Max(0, Before - GetCombatPoolCurrent());
+	if (!bWarden)
+	{
+		const int32 Before = GetCombatPoolCurrent();
+		Health->TakeDamage(static_cast<float>(Amount), DamageInstigator);
+		return FMath::Max(0, Before - GetCombatPoolCurrent());
+	}
+
+	m8finale::State State;
+	State.configured = true;
+	State.max_guard = WardenMaxGuard;
+	State.guard = WardenGuard;
+	State.guard_broken_at_ms = WardenGuardBrokenAtMs;
+	State.stagger_ms = WardenStaggerMs;
+	State.stagger_damage_pct = WardenStaggerDamagePct;
+	const int32 CurrentHP = FMath::Max(0, FMath::RoundToInt(Health->GetHP()));
+	const m8finale::DamageResult Result = m8finale::apply_damage(
+		State, CurrentHP, Amount, GetBehaviorNowMs());
+	WardenGuard = State.guard;
+	WardenGuardBrokenAtMs = State.guard_broken_at_ms;
+
+	if (Result.guard_broken)
+	{
+		bWardenExposureInitialized = false;
+		bPendingCommittedHit = false;
+		PendingCommittedHitRange = 0.0f;
+		if (AAIController* AI = Cast<AAIController>(GetController()))
+		{
+			AI->StopMovement();
+		}
+		GetCharacterMovement()->MaxWalkSpeed = 0.0f;
+		ApplyBehaviorPresentation();
+		UE_LOG(LogTemp, Display,
+			TEXT("[WardenPhase] room=%d ordinal=%d phase=Staggered guard=0 durationMs=%lld damagePct=%d"),
+			RoomIndex, SpawnOrdinal, static_cast<long long>(WardenStaggerMs),
+			WardenStaggerDamagePct);
+	}
+	if (Result.guard_damage > 0)
+	{
+		HandleDamaged(static_cast<float>(Result.guard_damage), DamageInstigator);
+	}
+	if (Result.hp_damage > 0)
+	{
+		Health->TakeDamage(static_cast<float>(Result.hp_damage), DamageInstigator);
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[WardenDamage] room=%d ordinal=%d raw=%d guardApplied=%d hpApplied=%d multiplierPct=%d guard=%d/%d hp=%.0f/%.0f phase=%d"),
+		RoomIndex, SpawnOrdinal, Amount, Result.guard_damage, Result.hp_damage,
+		Result.multiplier_pct, WardenGuard, WardenMaxGuard,
+		Health->GetHP(), Health->GetMaxHP(), static_cast<int32>(GetWardenPhase()));
+	return Result.guard_damage + Result.hp_damage;
 }
 
 bool ADungeonEnemy::CanApplyRoomChallengeModifier() const
 {
-	return IsActiveThreat() && !bRoomChallengeModified && GetCharacterMovement() != nullptr;
+	return IsActiveThreat() && !bWarden && !bRoomChallengeModified
+		&& GetCharacterMovement() != nullptr;
 }
 
 bool ADungeonEnemy::ApplyRoomChallengeModifier()
@@ -868,10 +1146,11 @@ void ADungeonEnemy::HandleDeath(AActor* /*DeadActor*/)
 	UE_LOG(LogTemp, Display,
 		TEXT("[EnemyBehavior] room=%d ordinal=%d death pendingCancelled=%s"),
 		RoomIndex, SpawnOrdinal, bCancelledPendingCommit ? TEXT("true") : TEXT("false"));
-	UE_LOG(LogTemp, Display, TEXT("[Enemy] died room=%d"), RoomIndex);
+	UE_LOG(LogTemp, Display, TEXT("[Enemy] died room=%d ordinal=%d warden=%s"),
+		RoomIndex, SpawnOrdinal, bWarden ? TEXT("true") : TEXT("false"));
 	if (ADungeonSpawner* Spawner = SpawnerRef.Get())
 	{
-		Spawner->NotifyEnemyDead(RoomIndex);
+		Spawner->NotifyEnemyDead(this);
 	}
 	Destroy();
 }

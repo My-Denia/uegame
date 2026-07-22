@@ -18,6 +18,15 @@ class UTextRenderComponent;
 class AAIController;
 struct FEncounterArchetypeStats;
 
+enum class EUegameWardenPhase : uint8
+{
+	Inactive = 0,
+	Guarded,
+	Staggered,
+	Exposed,
+	Dead
+};
+
 UCLASS()
 class UEGAME_API ADungeonEnemy : public ACharacter
 {
@@ -51,6 +60,15 @@ public:
 	int32 GetCombatPoolMax() const;
 	/** Apply integer player damage and return the authoritative amount removed. */
 	int32 ApplyPlayerDamage(int32 Amount, AActor* DamageInstigator);
+	/** Atomically replace combat-facing stats with the fixed CSV Warden profile. */
+	bool ConfigureAsWarden(const FCombatConfigRow& Row, int32 ResolveTokens);
+	bool IsWarden() const { return bWarden; }
+	EUegameWardenPhase GetWardenPhase() const;
+	int32 GetWardenGuard() const { return bWarden ? WardenGuard : 0; }
+	int32 GetWardenMaxGuard() const { return bWarden ? WardenMaxGuard : 0; }
+	int32 GetPlayerDamageMultiplierPercent() const;
+	float GetAssignedContactDamage() const { return AssignedContactDamage; }
+	float GetCommittedContactDamage() const { return ContactDamage; }
 	bool IsRoomChallengeModified() const { return bRoomChallengeModified; }
 
 	// --- M7A.2 read-only identity/HP surface (consumed by the AUegameHUD enemy readout) ---
@@ -79,6 +97,11 @@ public:
 	/** Development-only composite probe for cancellation windows that external commands cannot
 	 *  reach between the 0.05s behavior tick and 0.5s committed-damage tick. */
 	void RunBehaviorContractProbeForTests(int32 Mode);
+	/** One-shot atomic-config seam: 0=normal, 1=fail after stat mutation and require rollback. */
+	void SetWardenConfigFaultModeForTests(int32 Mode)
+	{
+		WardenConfigFaultModeForTests = FMath::Clamp(Mode, 0, 1);
+	}
 #endif
 
 	virtual void BeginPlay() override;
@@ -101,6 +124,7 @@ private:
 	void ClearBehaviorPulse();
 	void DriveBehaviorMovement(AAIController* AI, APawn* Player);
 	int64 GetBehaviorNowMs() const;
+	void ResetWardenState();
 
 	UFUNCTION()
 	void HandleDeath(AActor* DeadActor);
@@ -138,6 +162,7 @@ private:
 	TWeakObjectPtr<ADungeonSpawner> SpawnerRef;
 
 	float ContactDamage = 10.0f;
+	float AssignedContactDamage = 10.0f;
 	float DamageInterval = 1.0f;
 	/** Contact reach: capsule radii sum + slack; set from capsule sizes at spawn. */
 	float ContactRange = 130.0f;
@@ -169,7 +194,17 @@ private:
 	float PreChallengeBaseMoveSpeed = 0.0f;
 	int32 PreChallengeDurationNumerator = 1;
 	int32 PreChallengeDurationDenominator = 1;
+
+	// Mirrored POD fields for m8finale::State; the standard-library core stays out of UHT headers.
+	bool bWarden = false;
+	int32 WardenMaxGuard = 0;
+	int32 WardenGuard = 0;
+	int64 WardenGuardBrokenAtMs = -1;
+	int64 WardenStaggerMs = 0;
+	int32 WardenStaggerDamagePct = 100;
+	bool bWardenExposureInitialized = false;
 #if !UE_BUILD_SHIPPING
 	int32 BehaviorFaultModeForTests = 0;
+	int32 WardenConfigFaultModeForTests = 0;
 #endif
 };

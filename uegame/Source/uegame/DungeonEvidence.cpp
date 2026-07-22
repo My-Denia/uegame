@@ -13,6 +13,7 @@
 
 #include "DungeonSpawner.h"
 
+#include "Combat/BuildSynergyComponent.h"
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonStairs.h"
@@ -721,8 +722,10 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 			++ChallengeModified;
 		}
 	}
+	const ADungeonEnemy* Warden = Spawner ? Spawner->GetWarden() : nullptr;
+	const UHealthComponent* WardenHP = Warden ? Warden->GetHealthComponent() : nullptr;
 	UE_LOG(LogTemp, Display,
-		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d rooms=%d/%d/%d objective=%s exitSafe=%s exitBlocked=%s abandonedRooms=%d exitNeutralized=%d contractChoice=%d contractPending=%s contractResolved=%s secureRoom=%d challengeRoom=%d selectedRoom=%d challengeDisabled=%s fallbackWarning=%s unavailableWarning=%s contractCommits=%d challengeModified=%d |%s"),
+		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d rooms=%d/%d/%d objective=%s exitSafe=%s exitBlocked=%s abandonedRooms=%d exitNeutralized=%d contractChoice=%d contractPending=%s contractResolved=%s secureRoom=%d challengeRoom=%d selectedRoom=%d challengeDisabled=%s fallbackWarning=%s unavailableWarning=%s contractCommits=%d challengeModified=%d resolve=%d finale=%d ordinaryAlive=%d wardenCount=%d wardenDefeated=%s wardenRoom=%d wardenOrdinal=%d sourceType=%d wardenPhase=%d guard=%d/%d wardenHP=%.0f/%.0f |%s"),
 		(FM && FM->IsRunActive()) ? TEXT("yes") : TEXT("no"),
 		FM ? static_cast<int32>(FM->GetRunState()) : -1,
 		FM ? FM->GetFloorIndex() : -1,
@@ -749,6 +752,19 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		(FM && FM->HasRoomContractUnavailableWarning()) ? TEXT("true") : TEXT("false"),
 		FM ? FM->GetRoomContractCommitCount() : 0,
 		ChallengeModified,
+		FM ? FM->GetResolveTokens() : 0,
+		Spawner ? static_cast<int32>(Spawner->GetFinaleInitState()) : -1,
+		Spawner ? Spawner->GetLivingOrdinaryEnemyCount() : 0,
+		Warden ? 1 : 0,
+		(Spawner && Spawner->IsWardenDefeated()) ? TEXT("true") : TEXT("false"),
+		Warden ? Warden->GetRoomIndex() : INDEX_NONE,
+		Warden ? Warden->GetSpawnOrdinal() : INDEX_NONE,
+		Warden ? Warden->GetArchetypeTypeId() : INDEX_NONE,
+		Warden ? static_cast<int32>(Warden->GetWardenPhase()) : -1,
+		Warden ? Warden->GetWardenGuard() : 0,
+		Warden ? Warden->GetWardenMaxGuard() : 0,
+		WardenHP ? WardenHP->GetHP() : -1.0f,
+		WardenHP ? WardenHP->GetMaxHP() : -1.0f,
 		*Rooms);
 }
 
@@ -1257,6 +1273,181 @@ void DungeonFinaleInitFailCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	}
 }
 
+void DungeonFinaleStartCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || Args.Num() < 2 || Args.Num() > 3)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[DungeonEvidence] usage: Dungeon.FinaleStart <seed> <resolve 0..2> [failureMode 0..5]"));
+		return;
+	}
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!FM)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[FinaleTestStart] accepted=false reason=no-floor-manager"));
+		return;
+	}
+	const uint64 Seed = FCString::Strtoui64(*Args[0], nullptr, 10);
+	const int32 Resolve = FMath::Clamp(FCString::Atoi(*Args[1]), 0, 2);
+	const int32 FailureMode = Args.Num() > 2
+		? FMath::Clamp(FCString::Atoi(*Args[2]), 0, 5) : 0;
+	FM->StartFinaleForTests(Seed, Resolve, FailureMode);
+}
+
+void DungeonFinaleStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	UUegameFloorManager* FM = World ? UUegameFloorManager::Get(World) : nullptr;
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	ADungeonEnemy* Warden = Spawner ? Spawner->GetWarden() : nullptr;
+	const UHealthComponent* HP = Warden ? Warden->GetHealthComponent() : nullptr;
+	int32 WardenActors = 0;
+	if (World && Spawner)
+	{
+		for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+		{
+			const ADungeonEnemy* Enemy = *It;
+			if (IsValid(Enemy) && Enemy->GetOwningSpawner() == Spawner && Enemy->IsWarden())
+			{
+				++WardenActors;
+			}
+		}
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FinaleStatus] runState=%d floor=%d resolve=%d init=%d wardenActors=%d pointer=%s defeated=%s ordinaryAlive=%d room=%d ordinal=%d sourceType=%d phase=%d guard=%d/%d hp=%.0f/%.0f assignedDamage=%.0f committedDamage=%.0f objective=%s exitSafe=%s"),
+		FM ? static_cast<int32>(FM->GetRunState()) : -1,
+		FM ? FM->GetFloorIndex() : -1,
+		FM ? FM->GetResolveTokens() : 0,
+		Spawner ? static_cast<int32>(Spawner->GetFinaleInitState()) : -1,
+		WardenActors, Warden ? TEXT("true") : TEXT("false"),
+		(Spawner && Spawner->IsWardenDefeated()) ? TEXT("true") : TEXT("false"),
+		Spawner ? Spawner->GetLivingOrdinaryEnemyCount() : 0,
+		Warden ? Warden->GetRoomIndex() : INDEX_NONE,
+		Warden ? Warden->GetSpawnOrdinal() : INDEX_NONE,
+		Warden ? Warden->GetArchetypeTypeId() : INDEX_NONE,
+		Warden ? static_cast<int32>(Warden->GetWardenPhase()) : -1,
+		Warden ? Warden->GetWardenGuard() : 0,
+		Warden ? Warden->GetWardenMaxGuard() : 0,
+		HP ? HP->GetHP() : -1.0f, HP ? HP->GetMaxHP() : -1.0f,
+		Warden ? Warden->GetAssignedContactDamage() : -1.0f,
+		Warden ? Warden->GetCommittedContactDamage() : -1.0f,
+		(FM && FM->IsFloorObjectiveComplete()) ? TEXT("true") : TEXT("false"),
+		(FM && FM->AreFloorExitThreatsWithdrawn()) ? TEXT("true") : TEXT("false"));
+}
+
+void DungeonFinaleSwingProbeCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Player = PC ? PC->GetPawn() : nullptr;
+	ADungeonEnemy* Warden = Spawner ? Spawner->GetWarden() : nullptr;
+	UCombatComponent* Combat = Player ? Player->FindComponentByClass<UCombatComponent>() : nullptr;
+	UBuildSynergyComponent* Synergy = Player
+		? Player->FindComponentByClass<UBuildSynergyComponent>() : nullptr;
+	UHealthComponent* PlayerHP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!Spawner || !Player || !Warden || !Combat || !Synergy || !PlayerHP
+		|| Warden->GetWardenPhase() != EUegameWardenPhase::Guarded)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[FinaleSwingProbe] accepted=false reason=missing-or-nonguarded-authority"));
+		return;
+	}
+
+	const int32 GuardBeforeSetup = Warden->GetWardenGuard();
+	const int32 SetupDamage = FMath::Max(0, GuardBeforeSetup - 15);
+	if (SetupDamage > 0)
+	{
+		Warden->ApplyPlayerDamage(SetupDamage, Player);
+	}
+	if (Warden->GetWardenGuard() != 15)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[FinaleSwingProbe] accepted=false reason=guard-setup guard=%d"),
+			Warden->GetWardenGuard());
+		return;
+	}
+
+	const FVector PlayerLocation = Spawner->GetStartWorldLocation() + FVector(0.0f, 0.0f, 110.0f);
+	const FVector WardenLocation = PlayerLocation + FVector(100.0f, 0.0f, 0.0f);
+	Player->SetActorLocation(PlayerLocation, false, nullptr, ETeleportType::TeleportPhysics);
+	Player->SetActorRotation(FRotator::ZeroRotator, ETeleportType::TeleportPhysics);
+	Warden->SetActorLocation(WardenLocation, false, nullptr, ETeleportType::TeleportPhysics);
+	Warden->SetActorRotation(FRotator(0.0f, 180.0f, 0.0f), ETeleportType::TeleportPhysics);
+	if (PC)
+	{
+		PC->SetControlRotation(FRotator::ZeroRotator);
+	}
+	PlayerHP->SetHP(FMath::Min(100.0f, PlayerHP->GetMaxHP() - 10.0f));
+	Synergy->SetStateForTests(1, 2, 2, 1, 5000);
+	const float PlayerHPBefore = PlayerHP->GetHP();
+	const float WardenHPBefore = Warden->GetHealthComponent()
+		? Warden->GetHealthComponent()->GetHP() : -1.0f;
+	Combat->TryAttack();
+	const float WardenHPAfter = Warden->GetHealthComponent()
+		? Warden->GetHealthComponent()->GetHP() : -1.0f;
+	UE_LOG(LogTemp, Display,
+		TEXT("[FinaleSwingProbe] accepted=true setupGuard=%d->15 baseGuardBreak=true expectedRaw=15/8/11 expectedActual=23/12/17 hp=%.0f->%.0f playerHP=%.0f->%.0f phase=%d guard=%d"),
+		GuardBeforeSetup, WardenHPBefore, WardenHPAfter,
+		PlayerHPBefore, PlayerHP->GetHP(), static_cast<int32>(Warden->GetWardenPhase()),
+		Warden->GetWardenGuard());
+}
+
+void DungeonFinaleClearOrdinaryCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	APawn* Player = World && World->GetFirstPlayerController()
+		? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (!Spawner || !Player)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[FinaleClearOrdinary] accepted=false reason=missing-authority"));
+		return;
+	}
+	int32 Killed = 0;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Enemy = *It;
+		if (IsValid(Enemy) && Enemy->GetOwningSpawner() == Spawner
+			&& Enemy->IsActiveThreat() && !Enemy->IsWarden())
+		{
+			Enemy->ApplyPlayerDamage(999999, Player);
+			++Killed;
+		}
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FinaleClearOrdinary] accepted=true killed=%d ordinaryAlive=%d wardenDefeated=%s"),
+		Killed, Spawner->GetLivingOrdinaryEnemyCount(),
+		Spawner->IsWardenDefeated() ? TEXT("true") : TEXT("false"));
+}
+
+void DungeonFinaleKillWardenCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	APawn* Player = World && World->GetFirstPlayerController()
+		? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	ADungeonEnemy* Warden = Spawner ? Spawner->GetWarden() : nullptr;
+	if (!Spawner || !Player || !Warden || !Warden->IsActiveThreat())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[FinaleKillWarden] accepted=false reason=missing-active-warden"));
+		return;
+	}
+	const int32 GuardBefore = Warden->GetWardenGuard();
+	const float HPBefore = Warden->GetHealthComponent()
+		? Warden->GetHealthComponent()->GetHP() : -1.0f;
+	if (GuardBefore > 0)
+	{
+		Warden->ApplyPlayerDamage(GuardBefore, Player);
+	}
+	if (Warden->IsActiveThreat())
+	{
+		Warden->ApplyPlayerDamage(999999, Player);
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FinaleKillWarden] accepted=true guardBefore=%d hpBefore=%.0f defeated=%s ordinaryAlive=%d objective=%s"),
+		GuardBefore, HPBefore, Spawner->IsWardenDefeated() ? TEXT("true") : TEXT("false"),
+		Spawner->GetLivingOrdinaryEnemyCount(),
+		(UUegameFloorManager::Get(World) && UUegameFloorManager::Get(World)->IsFloorObjectiveComplete())
+			? TEXT("true") : TEXT("false"));
+}
+
 void DungeonBehaviorProbeCmd(const TArray<FString>& Args, UWorld* World)
 {
 	if (!World || Args.Num() != 2)
@@ -1429,6 +1620,7 @@ void DungeonRoomClearProbeCmd(const TArray<FString>& Args, UWorld* World)
 	const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
 	const int32 Role = Roles.IsValidIndex(Room) ? Roles[Room] : INDEX_NONE;
 	const int32 Before = FM->GetClearedCombatRooms();
+	const int32 ResolveBefore = FM->GetResolveTokens();
 	const int32 CachedAlive = Spawner->GetAliveInRoom(Room);
 	const bool bStageTrueClear = Mode == TEXT("stale-source")
 		|| Mode == TEXT("ambiguous-source") || Mode == TEXT("wrong-role");
@@ -1475,9 +1667,12 @@ void DungeonRoomClearProbeCmd(const TArray<FString>& Args, UWorld* World)
 	{
 		Spawner->SetRoomAliveCountForTests(Room, CachedAlive);
 	}
-	UE_LOG(LogTemp, Display, TEXT("[RoomClearTest] probe=%s after=%d unchanged=%s"),
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomClearTest] probe=%s after=%d unchanged=%s resolve=%d->%d resolveUnchanged=%s"),
 		*Mode, FM->GetClearedCombatRooms(),
-		FM->GetClearedCombatRooms() == Before ? TEXT("true") : TEXT("false"));
+		FM->GetClearedCombatRooms() == Before ? TEXT("true") : TEXT("false"),
+		ResolveBefore, FM->GetResolveTokens(),
+		FM->GetResolveTokens() == ResolveBefore ? TEXT("true") : TEXT("false"));
 }
 
 void DungeonRouteFaultModeCmd(const TArray<FString>& Args, UWorld* World)
@@ -1679,6 +1874,31 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleInitFailCmd(
 	TEXT("Dungeon.FinaleInitFail"),
 	TEXT("Development-only trigger for the explicit non-restarting finale error state"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleInitFailCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleStartCmd(
+	TEXT("Dungeon.FinaleStart"),
+	TEXT("Development-only focused final floor: <seed> <resolve 0..2> [failureMode 0..5]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleStartCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleStatusCmd(
+	TEXT("Dungeon.FinaleStatus"),
+	TEXT("Development-only readback of the unique fresh final-floor Warden authority"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleStatusCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleSwingProbeCmd(
+	TEXT("Dungeon.FinaleSwingProbe"),
+	TEXT("Development-only production TryAttack proof: base guard break then E/T/B authoritative damage"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleSwingProbeCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleClearOrdinaryCmd(
+	TEXT("Dungeon.FinaleClearOrdinary"),
+	TEXT("Development-only clear of active non-Warden enemies through ordinary damage/death callbacks"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleClearOrdinaryCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleKillWardenCmd(
+	TEXT("Dungeon.FinaleKillWarden"),
+	TEXT("Development-only guard-aware Warden kill through authoritative ApplyPlayerDamage"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleKillWardenCmd));
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonBehaviorProbeCmd(
 	TEXT("Dungeon.BehaviorProbe"),

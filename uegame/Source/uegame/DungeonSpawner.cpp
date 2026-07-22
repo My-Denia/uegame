@@ -30,6 +30,7 @@
 // uegame.Build.cs. Included ONLY in this .cpp - never in a reflected UE header - so
 // std/algorithm types stay out of UHT's view and unity builds cannot leak them around.
 #include "m2_adapter.hpp"
+#include "m8_finale.hpp"
 
 ADungeonSpawner::ADungeonSpawner()
 {
@@ -177,6 +178,14 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 	WC.wallHeight = static_cast<long long>(WallHeight);
 	const std::vector<m2::EnemyPlacement> Plan =
 		m2::buildEnemyPlan(Layout, WC, EffPerRoom, Layout.startRoom);
+	SpawnedEnemyActors.Reset();
+	LastPlannedRooms.Reset();
+	LastPlannedEnemyCount = static_cast<int32>(Plan.size());
+	LastPlannedRooms.Reserve(LastPlannedEnemyCount);
+	for (const m2::EnemyPlacement& Placement : Plan)
+	{
+		LastPlannedRooms.Add(Placement.roomIndex);
+	}
 
 	RoomAliveCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
 	RoomInitialCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
@@ -262,6 +271,7 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 			SpawnedTypes.Add(T);
 		}
 		Enemy->FinishSpawning(FTransform(Loc));
+		SpawnedEnemyActors.Add(Enemy);
 		++RoomAliveCounts[P.roomIndex];
 		++RoomInitialCounts[P.roomIndex];
 		++Spawned;
@@ -327,15 +337,170 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 	}
 }
 
-void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
+void ADungeonSpawner::ResetFinaleState()
 {
+	WardenEnemy.Reset();
+	bWardenDefeated = false;
+	FinaleInitState = EUegameFinaleInitState::NotRequired;
+}
+
+int32 ADungeonSpawner::GetLivingOrdinaryEnemyCount() const
+{
+	int32 Count = 0;
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : SpawnedEnemyActors)
+	{
+		const ADungeonEnemy* Enemy = WeakEnemy.Get();
+		if (Enemy && Enemy->IsActiveThreat() && !Enemy->IsWarden())
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+bool ADungeonSpawner::InitializeFinale(const FCombatConfigRow& Row, int32 ResolveTokens)
+{
+	WardenEnemy.Reset();
+	bWardenDefeated = false;
+	FinaleInitState = EUegameFinaleInitState::Pending;
+	int32 FailureMode = 0;
+#if !UE_BUILD_SHIPPING
+	FailureMode = FinaleInitFailureModeForTests;
+	FinaleInitFailureModeForTests = 0;
+#endif
+
+	std::vector<m8finale::Candidate> Candidates;
+	TArray<ADungeonEnemy*> CandidateActors;
+	Candidates.reserve(static_cast<size_t>(SpawnedEnemyActors.Num()));
+	CandidateActors.Reserve(SpawnedEnemyActors.Num());
+	TSet<const ADungeonEnemy*> UniqueActors;
+	bool bRuntimePreflight = LastPlannedEnemyCount > 0
+		&& SpawnedEnemyActors.Num() == LastPlannedEnemyCount
+		&& LastPlannedRooms.Num() == LastPlannedEnemyCount;
+	for (int32 Index = 0; bRuntimePreflight && Index < SpawnedEnemyActors.Num(); ++Index)
+	{
+		ADungeonEnemy* Enemy = SpawnedEnemyActors[Index].Get();
+		if (!IsValid(Enemy) || Enemy->IsActorBeingDestroyed() || !Enemy->IsActiveThreat()
+			|| Enemy->GetOwningSpawner() != this || UniqueActors.Contains(Enemy)
+			|| Enemy->GetSpawnOrdinal() != Index
+			|| !LastPlannedRooms.IsValidIndex(Index)
+			|| Enemy->GetRoomIndex() != LastPlannedRooms[Index]
+			|| Enemy->GetRoomIndex() == StartRoomIndex)
+		{
+			bRuntimePreflight = false;
+			break;
+		}
+		UniqueActors.Add(Enemy);
+		m8finale::Candidate Candidate;
+		Candidate.room_index = Enemy->GetRoomIndex();
+		Candidate.spawn_ordinal = static_cast<uint32>(Enemy->GetSpawnOrdinal());
+		Candidate.spawned = true;
+		Candidate.start_room = false;
+		Candidates.push_back(Candidate);
+		CandidateActors.Add(Enemy);
+	}
+
+	if (FailureMode == 1 && !Candidates.empty())
+	{
+		Candidates.pop_back();
+		CandidateActors.Pop();
+	}
+	else if (FailureMode == 2 && Candidates.size() > 1)
+	{
+		Candidates[1].spawn_ordinal = Candidates[0].spawn_ordinal;
+	}
+	else if (FailureMode == 3 && !Candidates.empty())
+	{
+		Candidates[0].room_index = RoomCentersWorld.Num();
+	}
+
+	const bool bCandidatesValid = bRuntimePreflight
+		&& m8finale::validate_candidates(
+			Candidates, static_cast<size_t>(LastPlannedEnemyCount), RoomCentersWorld.Num());
+	const size_t SelectedIndex = bCandidatesValid
+		? m8finale::select_warden(Candidates, FarthestRoomIndex)
+		: static_cast<size_t>(-1);
+	if (SelectedIndex >= static_cast<size_t>(CandidateActors.Num()))
+	{
+		FinaleInitState = EUegameFinaleInitState::Failed;
+		UE_LOG(LogTemp, Error,
+			TEXT("[WardenInit] committed=false reason=candidate-preflight failureMode=%d planned=%d actors=%d candidates=%d"),
+			FailureMode, LastPlannedEnemyCount, SpawnedEnemyActors.Num(),
+			static_cast<int32>(Candidates.size()));
+		return false;
+	}
+
+	ADungeonEnemy* Selected = CandidateActors[static_cast<int32>(SelectedIndex)];
+	FCombatConfigRow EffectiveRow = Row;
+	if (FailureMode == 5)
+	{
+		EffectiveRow.WardenMaxHP = 0.0f;
+	}
+#if !UE_BUILD_SHIPPING
+	if (FailureMode == 4)
+	{
+		Selected->SetWardenConfigFaultModeForTests(1);
+	}
+#endif
+	if (!Selected->ConfigureAsWarden(EffectiveRow, ResolveTokens))
+	{
+		FinaleInitState = EUegameFinaleInitState::Failed;
+		for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : SpawnedEnemyActors)
+		{
+			if (const ADungeonEnemy* Enemy = WeakEnemy.Get(); Enemy && Enemy->IsWarden())
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("[WardenInit] rollback-invariant=false unexpectedOrdinal=%d"),
+					Enemy->GetSpawnOrdinal());
+			}
+		}
+		UE_LOG(LogTemp, Error,
+			TEXT("[WardenInit] committed=false reason=profile-or-atomic-config failureMode=%d room=%d ordinal=%d"),
+			FailureMode, Selected->GetRoomIndex(), Selected->GetSpawnOrdinal());
+		return false;
+	}
+
+	WardenEnemy = Selected;
+	FinaleInitState = EUegameFinaleInitState::Succeeded;
+	UE_LOG(LogTemp, Display,
+		TEXT("[WardenSelection] committed=true room=%d farthestRoom=%d ordinal=%d sourceType=%d fallback=%s actorCount=%d location=(%.1f,%.1f,%.1f)"),
+		Selected->GetRoomIndex(), FarthestRoomIndex, Selected->GetSpawnOrdinal(),
+		Selected->GetArchetypeTypeId(),
+		Selected->GetRoomIndex() == FarthestRoomIndex ? TEXT("false") : TEXT("true"),
+		SpawnedEnemyActors.Num(), Selected->GetActorLocation().X,
+		Selected->GetActorLocation().Y, Selected->GetActorLocation().Z);
+	return true;
+}
+
+void ADungeonSpawner::NotifyEnemyDead(ADungeonEnemy* Enemy)
+{
+	if (!Enemy || Enemy->GetOwningSpawner() != this)
+	{
+		return;
+	}
+	const int32 InRoomIndex = Enemy->GetRoomIndex();
 	if (!RoomAliveCounts.IsValidIndex(InRoomIndex))
 	{
 		return;
 	}
 	const int32 OldAlive = RoomAliveCounts[InRoomIndex];
+	if (OldAlive <= 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[Combat] duplicate enemy death rejected room=%d ordinal=%d"),
+			InRoomIndex, Enemy->GetSpawnOrdinal());
+		return;
+	}
 	RoomAliveCounts[InRoomIndex] = FMath::Max(0, OldAlive - 1);
 	const int32 NewAlive = RoomAliveCounts[InRoomIndex];
+	if (WardenEnemy.Get() == Enemy && Enemy->IsWarden())
+	{
+		bWardenDefeated = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("[WardenDefeated] room=%d ordinal=%d ordinaryAlive=%d totalAlive=%d"),
+			InRoomIndex, Enemy->GetSpawnOrdinal(), GetLivingOrdinaryEnemyCount(),
+			GetTotalAliveEnemies());
+	}
 	UE_LOG(LogTemp, Display, TEXT("[Combat] enemy down in room=%d, alive=%d"),
 		InRoomIndex, NewAlive);
 
@@ -831,6 +996,13 @@ void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 		UE_LOG(LogTemp, Error, TEXT("[Dungeon] RegenerateFloor is game-world only"));
 		return;
 	}
+
+	// Clear additive finale identity before destroying floor-N actors. No weak pointer or guard
+	// state may survive a floor transition or explicit new run.
+	ResetFinaleState();
+	SpawnedEnemyActors.Reset();
+	LastPlannedRooms.Reset();
+	LastPlannedEnemyCount = 0;
 
 	// Despawn floor-N enemies silently (Destroy path skips HandleDeath, so no RoomClear noise).
 	int32 Despawned = 0;

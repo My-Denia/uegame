@@ -56,6 +56,7 @@ public:
 	bool IsProgressionBlockedByExitSafety() const { return bExitSafetyBlocked; }
 	int32 GetAbandonedCombatRooms() const { return AbandonedCombatRooms; }
 	int32 GetExitNeutralizedEnemies() const { return ExitNeutralizedEnemies; }
+	int32 GetResolveTokens() const { return ResolveTokens; }
 	EUegameRoomContractChoice GetRoomContractChoice() const { return RoomContractChoice; }
 	bool IsRoomContractPending() const { return RoomContractChoice == EUegameRoomContractChoice::Pending; }
 	bool IsRoomContractSelected() const
@@ -89,6 +90,8 @@ public:
 	{
 		ApplyRecoveryFraction(Fraction, Reason, RoomIndex);
 	}
+	/** Jump through the real StartRun/StartFloor path for a focused final-floor matrix. */
+	void StartFinaleForTests(uint64 InRunSeed, int32 InResolveTokens, int32 FailureMode);
 #endif
 
 	/** The single first-run seed authority (contract F, amended: seeded everywhere except this
@@ -183,6 +186,7 @@ private:
 	bool bExitSafetyBlocked = false;
 	int32 AbandonedCombatRooms = 0;
 	int32 ExitNeutralizedEnemies = 0;
+	int32 ResolveTokens = 0;
 	EUegameRoomContractChoice RoomContractChoice = EUegameRoomContractChoice::Unavailable;
 	int32 SecureContractRoom = INDEX_NONE;
 	int32 ChallengeContractRoom = INDEX_NONE;

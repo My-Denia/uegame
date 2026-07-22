@@ -271,15 +271,37 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 
 	RunSeed = InRunSeed;
 	bRunActive = true;
+	ResolveTokens = 0;
 	ClearRoomContractState();
 	RuntimeLifecycle.state = m8authority::RunState::Playing;
 	RefreshWorldPause();
 	PendingTransition = EPendingTransition::None;   // a manual (re)start cancels queued intent
-	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d"),
+	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d resolve=0"),
 		static_cast<unsigned long long>(RunSeed), FUegameCombatConfig::Get().MaxFloors);
 	ResetLoadoutForNewRun();   // M5: a run is a fresh build (clears any picks from a prior run this session)
 	StartFloor(1);
 }
+
+#if !UE_BUILD_SHIPPING
+void UUegameFloorManager::StartFinaleForTests(
+	uint64 InRunSeed, int32 InResolveTokens, int32 FailureMode)
+{
+	StartRun(InRunSeed);
+	if (!bRunActive || RuntimeLifecycle.state != m8authority::RunState::Playing)
+	{
+		return;
+	}
+	ResolveTokens = FMath::Clamp(InResolveTokens, 0, 2);
+	if (ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForCurrentFloor())
+	{
+		Spawner->SetFinaleInitFailureModeForTests(FailureMode);
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FinaleTestStart] runSeed=%llu resolve=%d failureMode=%d"),
+		static_cast<unsigned long long>(InRunSeed), ResolveTokens, FailureMode);
+	StartFloor(FUegameCombatConfig::Get().MaxFloors);
+}
+#endif
 
 void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 {
@@ -314,6 +336,14 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		Cfg.EnemiesPerRoom, Cfg.EnemyMaxHP, Cfg.PerFloorScaling);
 
 	Spawner->RegenerateFloor(FloorSeed, EffPerRoom, EffHP);
+	if (FloorIndex >= Cfg.MaxFloors)
+	{
+		if (!Spawner->InitializeFinale(Cfg, ResolveTokens))
+		{
+			NotifyFinaleInitFailed();
+			return;
+		}
+	}
 	ActualCombatRooms = FMath::Max(0, Spawner->GetActualEnemyRoomCount());
 	RequiredCombatRooms = m8room::required_combat_rooms(
 		FloorIndex, Cfg.MaxFloors, ActualCombatRooms, GetRoomFlowConfig(Cfg));
@@ -335,11 +365,11 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		PawnMax = HP->GetMaxHP();
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("[FloorStarted] floor=%d runSeed=%llu floorSeed=%llu playerHP=%.0f/%.0f"),
+		TEXT("[FloorStarted] floor=%d runSeed=%llu floorSeed=%llu playerHP=%.0f/%.0f resolve=%d finale=%d"),
 		FloorIndex,
 		static_cast<unsigned long long>(RunSeed),
 		static_cast<unsigned long long>(FloorSeed),
-		PawnHP, PawnMax);
+		PawnHP, PawnMax, ResolveTokens, static_cast<int32>(Spawner->GetFinaleInitState()));
 
 	if (RequiredCombatRooms == 0)
 	{
@@ -352,6 +382,12 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 	if (!bRunActive)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[FloorManager] no active run (use Dungeon.StartRun <seed>)"));
+		return;
+	}
+	if (RuntimeLifecycle.state != m8authority::RunState::Playing)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Stairs] descend BLOCKED by run-state=%d"),
+			static_cast<int32>(RuntimeLifecycle.state));
 		return;
 	}
 	if (PendingTransition != EPendingTransition::None)
@@ -480,6 +516,7 @@ void UUegameFloorManager::RestartRun(const TCHAR* Reason)
 	// M5: reset the build to base BEFORE the heal, so MaxHP is back to base(140) when Revive refills current
 	// HP (never leaves the new run at a prior run's boosted max, never refills-then-tops).
 	ResetLoadoutForNewRun();
+	ResolveTokens = 0;
 	HealPlayerFull();
 	m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::AckRestart);
 	StartFloor(1);
@@ -898,9 +935,20 @@ bool UUegameFloorManager::TryCommitRoomContract(int32 Index)
 
 bool UUegameFloorManager::CanCompleteCurrentFloor() const
 {
-	return m8contract::can_complete_floor(
+	const bool bContractComplete = m8contract::can_complete_floor(
 		bFloorObjectiveComplete, ClearedCombatRooms, RequiredCombatRooms,
 		ToCoreContractChoice(RoomContractChoice), bRoomContractSelectedRoomCleared);
+	if (!bContractComplete)
+	{
+		return false;
+	}
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	if (FloorIndex < Cfg.MaxFloors)
+	{
+		return true;
+	}
+	const ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForCurrentFloor();
+	return Spawner && Spawner->HasFinaleInitialized() && Spawner->IsWardenDefeated();
 }
 
 void UUegameFloorManager::NotifyRoomCleared(
@@ -943,10 +991,12 @@ void UUegameFloorManager::NotifyRoomCleared(
 		if (IsRoomContractChallenge() && !bRoomContractAwarded)
 		{
 			ApplyRecoveryFraction(0.50f, TEXT("challenge-clear"), RoomIndex);
+			const int32 OldResolve = ResolveTokens;
+			ResolveTokens = FMath::Clamp(ResolveTokens + 1, 0, 2);
 			bRoomContractAwarded = true;
 			UE_LOG(LogTemp, Display,
-				TEXT("[RoomContractAward] floor=%d room=%d choice=Challenge healFraction=0.50 awarded=true"),
-				FloorIndex, RoomIndex);
+				TEXT("[RoomContractAward] floor=%d room=%d choice=Challenge healFraction=0.50 awarded=true resolve=%d->%d"),
+				FloorIndex, RoomIndex, OldResolve, ResolveTokens);
 		}
 		else
 		{
@@ -968,7 +1018,8 @@ void UUegameFloorManager::NotifyRoomCleared(
 
 void UUegameFloorManager::NotifyFloorCleared()
 {
-	if (!bRunActive || bFloorObjectiveComplete)
+	if (!bRunActive || RuntimeLifecycle.state != m8authority::RunState::Playing
+		|| bFloorObjectiveComplete)
 	{
 		return;
 	}

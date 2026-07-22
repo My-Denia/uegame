@@ -82,6 +82,33 @@ struct SwingResult
 	bool bulwark_applied = false;
 };
 
+/** Intent emitted before proc packets touch the authoritative runtime target. Damage values are
+ *  raw inputs. This struct never predicts HP or claims a packet applied. */
+struct SwingPlan
+{
+	int executioner_damage = 0;
+	int tempo_damage = 0;
+	int bulwark_damage = 0;
+	int heal_request = 0;
+	int attack_cooldown_ms = 0;
+	int executioner_rank = 0;
+	int tempo_chain_after = 0;
+	bool executioner_qualified = false;
+	bool tempo_proc = false;
+	bool tempo_reset_by_miss = false;
+	bool counter_consumed = false;
+};
+
+/** Facts returned by the authoritative runtime after it attempted the ordered E -> T -> B packets. */
+struct SwingActual
+{
+	int executioner_damage = 0;
+	int tempo_damage = 0;
+	int bulwark_damage = 0;
+	int primary_pool_after = 0;
+	bool primary_dead_after = false;
+};
+
 int clamp_rank(int rank);
 int percentage_of(int base, int pct);
 bool at_or_below_threshold(int current_hp, int max_hp, int threshold_pct);
@@ -91,5 +118,7 @@ void reset_transient(State& state);
 DamageEventResult on_owner_damage(
 	State& state, const Ranks& ranks, int amount, bool enemy_instigated, std::int64_t now_ms);
 SwingResult resolve_accepted_swing(State& state, const SwingInput& input);
+SwingPlan plan_accepted_swing(State& state, const SwingInput& input);
+SwingResult reconcile_accepted_swing(const SwingPlan& plan, const SwingActual& actual);
 std::int64_t counter_remaining_ms(const State& state, std::int64_t now_ms);
 }

@@ -219,6 +219,64 @@ int main()
 		&& hybrid_out.heal == 10 && hybrid_out.cooldown_refund_ms == 210,
 		"synthetic E2/T1/B2 stress: strict E-T-B ordering and dead-primary spend");
 
+	State warden;
+	warden.tempo_chain = 1;
+	warden.counter_active = true;
+	warden.counter_expires_at_ms = 5000;
+	SwingInput wi;
+	wi.ranks = { 1, 2, 2 };
+	wi.base_damage = 15;
+	wi.attack_cooldown_ms = 600;
+	wi.hits = 1;
+	wi.now_ms = 1000;
+	wi.has_primary = true;
+	wi.primary_current_hp = 30;
+	wi.primary_max_hp = 120;
+	wi.primary_hp_after_base = 300;
+	const SwingPlan warden_plan = plan_accepted_swing(warden, wi);
+	check(warden_plan.executioner_damage == 15 && warden_plan.tempo_damage == 8
+		&& warden_plan.bulwark_damage == 11 && warden_plan.heal_request == 10,
+		"guard-break swing emits raw E15 T8 B11 intents and Bulwark heal request");
+	SwingActual warden_actual;
+	warden_actual.executioner_damage = 23;
+	warden_actual.tempo_damage = 12;
+	warden_actual.bulwark_damage = 17;
+	warden_actual.primary_pool_after = 248;
+	const SwingResult warden_settled = reconcile_accepted_swing(warden_plan, warden_actual);
+	check(warden_settled.executioner_applied && warden_settled.tempo_applied
+		&& warden_settled.bulwark_applied && warden_settled.heal == 10
+		&& warden_settled.primary_hp_after_synergies == 248,
+		"authoritative Warden reconciliation binds actual E23 T12 B17 once");
+
+	SwingPlan kill_plan = warden_plan;
+	kill_plan.executioner_rank = 2;
+	SwingActual killed_late;
+	killed_late.tempo_damage = 5;
+	killed_late.primary_dead_after = true;
+	const SwingResult killed_late_result = reconcile_accepted_swing(kill_plan, killed_late);
+	check(killed_late_result.cooldown_refund_ms == 210 && !killed_late_result.executioner_applied,
+		"Executioner refund uses pre-pool qualification plus authoritative later-proc death");
+
+	SwingPlan dead_primary_counter;
+	dead_primary_counter.counter_consumed = true;
+	dead_primary_counter.heal_request = 10;
+	const SwingResult dead_primary_settled = reconcile_accepted_swing(
+		dead_primary_counter, SwingActual{});
+	check(dead_primary_settled.counter_consumed && dead_primary_settled.heal == 10
+		&& !dead_primary_settled.bulwark_applied,
+		"Bulwark heal survives base-killed primary when the armed counter was consumed");
+
+	SwingPlan ordinary_counter;
+	ordinary_counter.counter_consumed = true;
+	ordinary_counter.bulwark_damage = 11;
+	ordinary_counter.heal_request = 10;
+	SwingActual ordinary_actual;
+	ordinary_actual.bulwark_damage = 11;
+	const SwingResult ordinary_settled = reconcile_accepted_swing(ordinary_counter, ordinary_actual);
+	check(ordinary_settled.bulwark_applied && ordinary_settled.bulwark_damage == 11
+		&& ordinary_settled.heal == 10,
+		"ordinary counter parity keeps raw and actual 11 plus heal request");
+
 	State sync;
 	sync.tempo_chain = 2;
 	sync.counter_active = true;

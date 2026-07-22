@@ -147,22 +147,30 @@ void UCombatComponent::TryAttack()
 	if (Synergy)
 	{
 		const int32 HPAfterBase = Primary ? Primary->Enemy->GetCombatPoolCurrent() : 0;
-		const FBuildSynergySwingResult Proc = Synergy->ResolveAcceptedSwing(
+		const FBuildSynergySwingPlan Plan = Synergy->PlanAcceptedSwing(
 			AttackDamage, AttackCooldownMs, Hits, Now, Primary != nullptr,
 			Primary ? Primary->PreHP : 0, Primary ? Primary->MaxHP : 1, HPAfterBase);
 
-		if (Primary && !Primary->Health->IsDead() && Proc.ExecutionerDamage > 0)
+		int32 ExecutionerApplied = 0;
+		int32 TempoApplied = 0;
+		int32 BulwarkApplied = 0;
+		if (Primary && !Primary->Health->IsDead() && Plan.ExecutionerDamage > 0)
 		{
-			Primary->Enemy->ApplyPlayerDamage(Proc.ExecutionerDamage, Owner);
+			ExecutionerApplied = Primary->Enemy->ApplyPlayerDamage(Plan.ExecutionerDamage, Owner);
 		}
-		if (Primary && !Primary->Health->IsDead() && Proc.TempoDamage > 0)
+		if (Primary && !Primary->Health->IsDead() && Plan.TempoDamage > 0)
 		{
-			Primary->Enemy->ApplyPlayerDamage(Proc.TempoDamage, Owner);
+			TempoApplied = Primary->Enemy->ApplyPlayerDamage(Plan.TempoDamage, Owner);
 		}
-		if (Primary && !Primary->Health->IsDead() && Proc.BulwarkDamage > 0)
+		if (Primary && !Primary->Health->IsDead() && Plan.BulwarkDamage > 0)
 		{
-			Primary->Enemy->ApplyPlayerDamage(Proc.BulwarkDamage, Owner);
+			BulwarkApplied = Primary->Enemy->ApplyPlayerDamage(Plan.BulwarkDamage, Owner);
 		}
+		const int32 FinalPool = Primary ? Primary->Enemy->GetCombatPoolCurrent() : 0;
+		const bool bPrimaryDead = Primary && Primary->Health->IsDead();
+		const FBuildSynergySwingResult Proc = Synergy->ReconcileAcceptedSwing(
+			Plan, ExecutionerApplied, TempoApplied, BulwarkApplied,
+			FinalPool, bPrimaryDead, Now);
 		if (Proc.CooldownRefundMs > 0)
 		{
 			LastAttackTime -= static_cast<double>(Proc.CooldownRefundMs) / 1000.0;
@@ -171,9 +179,12 @@ void UCombatComponent::TryAttack()
 			|| Proc.CooldownRefundMs > 0)
 		{
 			UE_LOG(LogTemp, Display,
-				TEXT("[BuildSynergy] primaryOrdinal=%d E=%d T=%d B=%d heal=%d refundMs=%d"),
+				TEXT("[BuildSynergy] primaryOrdinal=%d rawE=%d rawT=%d rawB=%d actualE=%d actualT=%d actualB=%d finalPool=%d dead=%s heal=%d refundMs=%d"),
 				Primary ? Primary->SpawnOrdinal : INDEX_NONE,
 				Proc.ExecutionerDamage, Proc.TempoDamage, Proc.BulwarkDamage,
+				Proc.ExecutionerAppliedDamage, Proc.TempoAppliedDamage,
+				Proc.BulwarkAppliedDamage, FinalPool,
+				bPrimaryDead ? TEXT("true") : TEXT("false"),
 				Proc.Heal, Proc.CooldownRefundMs);
 		}
 	}
