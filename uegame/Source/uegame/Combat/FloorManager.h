@@ -48,11 +48,24 @@ public:
 	uint64 GetRunSeed() const { return RunSeed; }
 	int32 GetFloorIndex() const { return FloorIndex; }
 	m8authority::RunState GetRunState() const { return RuntimeLifecycle.state; }
+	int32 GetClearedCombatRooms() const { return ClearedCombatRooms; }
+	int32 GetRequiredCombatRooms() const { return RequiredCombatRooms; }
+	int32 GetActualCombatRooms() const { return ActualCombatRooms; }
 	bool IsFloorObjectiveComplete() const { return bFloorObjectiveComplete; }
 	bool AreFloorExitThreatsWithdrawn() const { return bFloorExitThreatsWithdrawn; }
 	bool IsProgressionBlockedByExitSafety() const { return bExitSafetyBlocked; }
+	int32 GetAbandonedCombatRooms() const { return AbandonedCombatRooms; }
+	int32 GetExitNeutralizedEnemies() const { return ExitNeutralizedEnemies; }
 	EUegameRoomContractChoice GetRoomContractChoice() const { return RoomContractChoice; }
 	bool IsRoomContractPending() const { return RoomContractChoice == EUegameRoomContractChoice::Pending; }
+	bool IsRoomContractSelected() const
+	{
+		return RoomContractChoice == EUegameRoomContractChoice::Secure
+			|| RoomContractChoice == EUegameRoomContractChoice::Challenge;
+	}
+	bool IsRoomContractChallenge() const { return RoomContractChoice == EUegameRoomContractChoice::Challenge; }
+	bool IsRoomContractResolved() const { return bRoomContractSelectedRoomCleared; }
+	bool ShouldPrioritizeContractRoom() const { return IsRoomContractSelected() && !bRoomContractSelectedRoomCleared; }
 	int32 GetSecureContractRoom() const { return SecureContractRoom; }
 	int32 GetChallengeContractRoom() const { return ChallengeContractRoom; }
 	int32 GetSelectedContractRoom() const { return SelectedContractRoom; }
@@ -61,7 +74,21 @@ public:
 	bool HasRoomContractUnavailableWarning() const { return RoomContractWarning == EUegameRoomContractWarning::Unavailable; }
 	int32 GetRoomContractCommitCount() const { return RoomContractCommitCount; }
 #if !UE_BUILD_SHIPPING
-	void SetForceNoFreshSpawnerForTests(bool bForce) { bForceNoFreshSpawnerForTests = bForce; }
+	/** Development-only authority seam: 0=normal, 1=missing, 2=ambiguous. */
+	void SetFreshSpawnerFaultModeForTests(int32 Mode)
+	{
+		FreshSpawnerFaultModeForTests = FMath::Clamp(Mode, 0, 2);
+	}
+	/** One-shot fault used only by exit completion, after room-clear provenance succeeds. */
+	void SetExitFreshSpawnerFaultModeForTests(int32 Mode)
+	{
+		ExitFreshSpawnerFaultModeForTests = FMath::Clamp(Mode, 0, 2);
+	}
+	/** Exercise the real HealthComponent-backed recovery exclusion path without duplicating it. */
+	void ApplyRecoveryForTests(float Fraction, const TCHAR* Reason, int32 RoomIndex)
+	{
+		ApplyRecoveryFraction(Fraction, Reason, RoomIndex);
+	}
 #endif
 
 	/** The single first-run seed authority (contract F, amended: seeded everywhere except this
@@ -82,10 +109,12 @@ public:
 	 *  reward-pending gate (forensic force). */
 	void RequestDescend(bool bForce);
 
-	/** M5: a floor's last enemy room just cleared. If this floor owes a reward (FloorIndex < MaxFloors),
-	 *  generate the 3-choose-1 offer on the player's loadout component and mark the reward pending, which
-	 *  blocks descend until a pick is made. The final floor owes no reward (no useless pre-win offer). */
+	/** Idempotent objective completion. Exit withdrawal must succeed before reward/progression. */
 	void NotifyFloorCleared();
+
+	/** Accept one first true room clear only from the unique fresh source snapshot. */
+	void NotifyRoomCleared(ADungeonSpawner* SourceSpawner, int32 RoomIndex, int32 CachedRole,
+		int32 OldAlive, int32 NewAlive);
 
 	/** M5: apply the player's reward pick (0..2) on the loadout component and, on success, re-poke the
 	 *  stairs so a player already on the pad descends. Driven by Dungeon.ChooseLoadout and keys 1/2/3. */
@@ -124,6 +153,7 @@ private:
 	void ResetLoadoutForNewRun() const;
 	/** M5: re-attempt descend on every stairs pad after a reward pick (no-op unless the pawn is on a pad). */
 	void RepokeStairsForDescend() const;
+	void ApplyPostRewardRecovery() const;
 	void ApplyWorldPause(bool bPaused) const;
 	void RefreshWorldPause() const;
 	void ClearRoomContractState();
@@ -133,6 +163,9 @@ private:
 	bool CommitSecureContract(ADungeonSpawner* Spawner, bool bFallback, const TCHAR* FailureReason);
 	void ResolveRoomContractUnavailable(const TCHAR* Reason);
 	void ApplyContractHeal(float Fraction, const TCHAR* Reason, int32 RoomIndex) const;
+	void ApplyRecoveryFraction(float Fraction, const TCHAR* Reason, int32 RoomIndex) const;
+	bool CanCompleteCurrentFloor() const;
+	bool IsUniqueFreshSource(const ADungeonSpawner* SourceSpawner) const;
 
 	FDelegateHandle ActorsInitializedHandle;
 
@@ -141,18 +174,27 @@ private:
 	bool bRunActive = false;
 	EPendingTransition PendingTransition = EPendingTransition::None;
 	m8authority::Lifecycle RuntimeLifecycle;
+	int32 ClearedCombatRooms = 0;
+	int32 RequiredCombatRooms = 0;
+	int32 ActualCombatRooms = 0;
+	TSet<int32> ClearedRoomIndices;
 	bool bFloorObjectiveComplete = false;
 	bool bFloorExitThreatsWithdrawn = false;
 	bool bExitSafetyBlocked = false;
+	int32 AbandonedCombatRooms = 0;
+	int32 ExitNeutralizedEnemies = 0;
 	EUegameRoomContractChoice RoomContractChoice = EUegameRoomContractChoice::Unavailable;
 	int32 SecureContractRoom = INDEX_NONE;
 	int32 ChallengeContractRoom = INDEX_NONE;
 	int32 SelectedContractRoom = INDEX_NONE;
 	bool bChallengeContractDisabled = false;
+	bool bRoomContractSelectedRoomCleared = false;
+	bool bRoomContractAwarded = false;
 	EUegameRoomContractWarning RoomContractWarning = EUegameRoomContractWarning::None;
 	int32 RoomContractCommitCount = 0;
 #if !UE_BUILD_SHIPPING
-	bool bForceNoFreshSpawnerForTests = false;
+	int32 FreshSpawnerFaultModeForTests = 0;
+	int32 ExitFreshSpawnerFaultModeForTests = 0;
 #endif
 
 	/** Set by Dungeon.SetRunSeed: overrides entropy for the next first-run seed. */

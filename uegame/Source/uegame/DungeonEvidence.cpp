@@ -15,6 +15,7 @@
 
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
+#include "Combat/DungeonStairs.h"
 #include "Combat/DungeonEnemy.h"
 #include "Combat/EncounterConfig.h"
 #include "Combat/FloorManager.h"
@@ -22,6 +23,7 @@
 #include "Combat/LoadoutComponent.h"
 #include "UI/UegameHUD.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
+#include "Components/CapsuleComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -50,6 +52,8 @@ namespace
 
 uint64 GObjectiveRouteDriveGeneration = 0;
 TWeakObjectPtr<APlayerController> GObjectiveRouteDriveController;
+uint64 GForwardHoldGeneration = 0;
+TWeakObjectPtr<APlayerController> GForwardHoldController;
 
 void ReleaseObjectiveRouteDriveInput(const TCHAR* Reason, float TravelCm, double ElapsedSeconds)
 {
@@ -70,6 +74,33 @@ ADungeonSpawner* FindSpawner(UWorld* World)
 		return *It;
 	}
 	return nullptr;
+}
+
+ADungeonSpawner* FindUniqueFreshSpawnerForEvidence(UWorld* World)
+{
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!World || !FM)
+	{
+		return nullptr;
+	}
+	ADungeonSpawner* Match = nullptr;
+	for (TActorIterator<ADungeonSpawner> It(World); It; ++It)
+	{
+		ADungeonSpawner* Candidate = *It;
+		if (!IsValid(Candidate) || Candidate->IsActorBeingDestroyed()
+			|| !Candidate->HasEncounterAssignment()
+			|| Candidate->GetEncounterRunSeed() != FM->GetRunSeed()
+			|| Candidate->GetEncounterFloorIndex() != FM->GetFloorIndex())
+		{
+			continue;
+		}
+		if (Match)
+		{
+			return nullptr;
+		}
+		Match = Candidate;
+	}
+	return Match;
 }
 
 void DungeonSpawnCmd(const TArray<FString>& Args, UWorld* World)
@@ -300,6 +331,53 @@ void DungeonKillNearestCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	}
 }
 
+void DungeonClearRoomCmd(const TArray<FString>& Args, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	if (!Spawner || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ClearRoom <roomIndex>; unique fresh spawner required"));
+		return;
+	}
+	const int32 RoomIndex = FCString::Atoi(*Args[0]);
+	if (RoomIndex < 0 || RoomIndex >= Spawner->GetRoomCount())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] ClearRoom room=%d out of range rooms=%d"),
+			RoomIndex, Spawner->GetRoomCount());
+		return;
+	}
+	APawn* Player = World && World->GetFirstPlayerController()
+		? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	TArray<ADungeonEnemy*> Targets;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Enemy = *It;
+		if (IsValid(Enemy) && Enemy->IsActiveThreat()
+			&& Enemy->GetOwningSpawner() == Spawner && Enemy->GetRoomIndex() == RoomIndex)
+		{
+			Targets.Add(Enemy);
+		}
+	}
+	Targets.Sort([](const ADungeonEnemy& A, const ADungeonEnemy& B)
+	{
+		return A.GetSpawnOrdinal() < B.GetSpawnOrdinal();
+	});
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomClearTest] clearRoom=%d targets=%d oldAlive=%d source=fresh"),
+		RoomIndex, Targets.Num(), Spawner->GetAliveInRoom(RoomIndex));
+	for (ADungeonEnemy* Enemy : Targets)
+	{
+		if (UHealthComponent* HP = Enemy->FindComponentByClass<UHealthComponent>())
+		{
+			HP->TakeDamage(99999.0f, Player);
+		}
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomClearTest] clearRoom=%d newAlive=%d complete=%s"),
+		RoomIndex, Spawner->GetAliveInRoom(RoomIndex),
+		Spawner->GetAliveInRoom(RoomIndex) == 0 ? TEXT("true") : TEXT("false"));
+}
+
 void DungeonTeleportToRoomCmd(const TArray<FString>& Args, UWorld* World)
 {
 	if (!World || Args.Num() < 1)
@@ -325,6 +403,137 @@ void DungeonTeleportToRoomCmd(const TArray<FString>& Args, UWorld* World)
 	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] teleported player to room=%d"), Idx);
 }
 
+void DungeonStageBeforeStairsCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	if (!Spawner || !PC || !Pawn)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[StairsInputTest] staged=false reason=missing-authority-or-player"));
+		return;
+	}
+	ADungeonStairs* Stairs = nullptr;
+	int32 Matches = 0;
+	const FVector Expected = Spawner->GetFarthestRoomCenterWorld();
+	for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+	{
+		if (IsValid(*It) && !(*It)->IsActorBeingDestroyed()
+			&& FVector::DistSquared2D((*It)->GetActorLocation(), Expected) <= 1.0f)
+		{
+			Stairs = *It;
+			++Matches;
+		}
+	}
+	UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	const ANavigationData* NavData = NavSystem
+		? NavSystem->GetNavDataForProps(Pawn->GetNavAgentPropertiesRef(), Pawn->GetActorLocation()) : nullptr;
+	if (Matches != 1 || !Stairs || !NavSystem || !NavData)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[StairsInputTest] staged=false reason=stairs-or-nav matches=%d nav=%s"),
+			Matches, NavData ? *NavData->GetName() : TEXT("NONE"));
+		return;
+	}
+	FNavLocation ProjectedStart;
+	FNavLocation ProjectedEnd;
+	const FVector Extent(120.0f, 120.0f, 220.0f);
+	if (!NavSystem->ProjectPointToNavigation(Pawn->GetActorLocation(), ProjectedStart, Extent, NavData)
+		|| !NavSystem->ProjectPointToNavigation(Stairs->GetActorLocation(), ProjectedEnd, Extent, NavData))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[StairsInputTest] staged=false reason=projection"));
+		return;
+	}
+	FPathFindingQuery Query(Pawn, *NavData, ProjectedStart.Location, ProjectedEnd.Location);
+	Query.SetAllowPartialPaths(false);
+	const FPathFindingResult Path = NavSystem->FindPathSync(Query);
+	if (!Path.IsSuccessful() || !Path.Path.IsValid() || Path.IsPartial()
+		|| Path.Path->GetPathPoints().Num() < 2)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[StairsInputTest] staged=false reason=path partial=%s"),
+			Path.IsPartial() ? TEXT("true") : TEXT("false"));
+		return;
+	}
+	const TArray<FNavPathPoint>& Points = Path.Path->GetPathPoints();
+	FVector StageOnNav = ProjectedStart.Location;
+	float Remaining = 420.0f;
+	FVector Cursor = ProjectedEnd.Location;
+	for (int32 Index = Points.Num() - 2; Index >= 0; --Index)
+	{
+		const FVector Previous = Points[Index].Location;
+		const float Segment = FVector::Dist2D(Cursor, Previous);
+		if (Segment >= Remaining && Segment > KINDA_SMALL_NUMBER)
+		{
+			StageOnNav = Cursor + (Previous - Cursor).GetSafeNormal2D() * Remaining;
+			Remaining = 0.0f;
+			break;
+		}
+		Remaining -= Segment;
+		Cursor = Previous;
+		StageOnNav = Previous;
+	}
+	const float HalfHeight = Pawn->GetSimpleCollisionHalfHeight();
+	const FVector StageLocation = StageOnNav + FVector(0.0f, 0.0f, HalfHeight);
+	const UCapsuleComponent* Capsule = Pawn->FindComponentByClass<UCapsuleComponent>();
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(StairsInputStage), false, Pawn);
+	const bool bCapsuleClear = Capsule && !World->OverlapBlockingTestByChannel(
+		StageLocation, FQuat::Identity, Capsule->GetCollisionObjectType(),
+		FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(),
+			Capsule->GetScaledCapsuleHalfHeight()), QueryParams);
+	const bool bMoved = bCapsuleClear && Pawn->SetActorLocation(StageLocation, false);
+	FRotator Rotation = PC->GetControlRotation();
+	Rotation.Yaw = (ProjectedEnd.Location - Pawn->GetActorLocation()).Rotation().Yaw;
+	Rotation.Pitch = 0.0f;
+	Rotation.Roll = 0.0f;
+	PC->SetControlRotation(Rotation);
+	UE_LOG(LogTemp, Display,
+		TEXT("[StairsInputTest] staged=%s path=true partial=false capsuleClear=%s distanceCm=%.1f yaw=%.1f"),
+		bMoved ? TEXT("true") : TEXT("false"), bCapsuleClear ? TEXT("true") : TEXT("false"),
+		FVector::Dist2D(Pawn->GetActorLocation(), Stairs->GetActorLocation()), Rotation.Yaw);
+}
+
+void DungeonHoldForwardCmd(const TArray<FString>& Args, UWorld* World)
+{
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	if (!PC || !PC->GetPawn())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[StairsInputTest] hold=false reason=no-player"));
+		return;
+	}
+	if (APlayerController* Previous = GForwardHoldController.Get())
+	{
+		Previous->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::W, IE_Released, 0.0f));
+	}
+	const float Seconds = Args.Num() > 0
+		? FMath::Clamp(FCString::Atof(*Args[0]), 0.1f, 3.0f) : 1.0f;
+	const uint64 Generation = ++GForwardHoldGeneration;
+	const double StartedAt = FPlatformTime::Seconds();
+	GForwardHoldController = PC;
+	PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::W, IE_Pressed, 1.0f));
+	UE_LOG(LogTemp, Display,
+		TEXT("[StairsInputTest] hold=true input=W_PRESSED seconds=%.2f repeatEvents=0"), Seconds);
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+		[Generation, StartedAt, Seconds](float)
+		{
+			if (Generation != GForwardHoldGeneration)
+			{
+				return false;
+			}
+			if (FPlatformTime::Seconds() - StartedAt < Seconds)
+			{
+				return true;
+			}
+			if (APlayerController* HeldPC = GForwardHoldController.Get())
+			{
+				HeldPC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::W, IE_Released, 0.0f));
+			}
+			GForwardHoldController.Reset();
+			UE_LOG(LogTemp, Display,
+				TEXT("[StairsInputTest] hold=false input=W_RELEASED repeatEvents=0"));
+			return false;
+		}), 0.0f);
+}
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonCombatStatusCmd(
 	TEXT("Dungeon.CombatStatus"),
 	TEXT("Log player HP, enemy count, nearest-enemy distance, per-room alive/initial counts"),
@@ -340,10 +549,25 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonKillNearestCmd(
 	TEXT("Test-only cheat: apply lethal damage to the enemy nearest the player"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonKillNearestCmd));
 
+FAutoConsoleCommandWithWorldAndArgs GDungeonClearRoomCmd(
+	TEXT("Dungeon.ClearRoom"),
+	TEXT("Development-only evidence: lethally damage every active enemy in one room through ordinary death callbacks"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonClearRoomCmd));
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonTeleportToRoomCmd(
 	TEXT("Dungeon.TeleportToRoom"),
 	TEXT("Teleport the player to a room center: Dungeon.TeleportToRoom <roomIndex>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonTeleportToRoomCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonStageBeforeStairsCmd(
+	TEXT("Dungeon.StageBeforeStairs"),
+	TEXT("Development-only: stage the pawn on the final verified nav segment before the current stairs"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonStageBeforeStairsCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonHoldForwardCmd(
+	TEXT("Dungeon.HoldForward"),
+	TEXT("Development-only: one continuous W press/release without pulsed movement: [seconds]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonHoldForwardCmd));
 
 void DungeonFaceNearestCmd(const TArray<FString>& Args, UWorld* World)
 {
@@ -498,7 +722,7 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		}
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d objective=%s exitSafe=%s exitBlocked=%s contractChoice=%d contractPending=%s secureRoom=%d challengeRoom=%d selectedRoom=%d challengeDisabled=%s fallbackWarning=%s unavailableWarning=%s contractCommits=%d challengeModified=%d |%s"),
+		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d rooms=%d/%d/%d objective=%s exitSafe=%s exitBlocked=%s abandonedRooms=%d exitNeutralized=%d contractChoice=%d contractPending=%s contractResolved=%s secureRoom=%d challengeRoom=%d selectedRoom=%d challengeDisabled=%s fallbackWarning=%s unavailableWarning=%s contractCommits=%d challengeModified=%d |%s"),
 		(FM && FM->IsRunActive()) ? TEXT("yes") : TEXT("no"),
 		FM ? static_cast<int32>(FM->GetRunState()) : -1,
 		FM ? FM->GetFloorIndex() : -1,
@@ -506,11 +730,17 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		static_cast<unsigned long long>(Spawner ? Spawner->GetEffectiveSeed64() : 0),
 		HP ? HP->GetHP() : -1.0f, HP ? HP->GetMaxHP() : -1.0f,
 		Alive, Total,
+		FM ? FM->GetClearedCombatRooms() : 0,
+		FM ? FM->GetRequiredCombatRooms() : 0,
+		FM ? FM->GetActualCombatRooms() : 0,
 		(FM && FM->IsFloorObjectiveComplete()) ? TEXT("true") : TEXT("false"),
 		(FM && FM->AreFloorExitThreatsWithdrawn()) ? TEXT("true") : TEXT("false"),
 		(FM && FM->IsProgressionBlockedByExitSafety()) ? TEXT("true") : TEXT("false"),
+		FM ? FM->GetAbandonedCombatRooms() : 0,
+		FM ? FM->GetExitNeutralizedEnemies() : 0,
 		FM ? static_cast<int32>(FM->GetRoomContractChoice()) : -1,
 		(FM && FM->IsRoomContractPending()) ? TEXT("true") : TEXT("false"),
+		(FM && FM->IsRoomContractResolved()) ? TEXT("true") : TEXT("false"),
 		FM ? FM->GetSecureContractRoom() : INDEX_NONE,
 		FM ? FM->GetChallengeContractRoom() : INDEX_NONE,
 		FM ? FM->GetSelectedContractRoom() : INDEX_NONE,
@@ -995,13 +1225,12 @@ void DungeonExitWithdrawalFailureCmd(const TArray<FString>& Args, UWorld* World)
 	ADungeonSpawner* Spawner = FindSpawner(World);
 	if (!Spawner || Args.Num() != 1)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ExitWithdrawalFailure <0|1>"));
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ExitWithdrawalFailure <0|1|2>"));
 		return;
 	}
-	const bool bForce = FCString::Atoi(*Args[0]) != 0;
-	Spawner->SetForceExitWithdrawalFailureForTests(bForce);
-	UE_LOG(LogTemp, Display, TEXT("[RuntimeAuthorityTest] exitWithdrawalFailure=%s"),
-		bForce ? TEXT("true") : TEXT("false"));
+	const int32 Mode = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 2);
+	Spawner->SetExitWithdrawalFailureModeForTests(Mode);
+	UE_LOG(LogTemp, Display, TEXT("[RuntimeAuthorityTest] exitWithdrawalFailureMode=%d oneShot=true"), Mode);
 }
 
 void DungeonNotifyFloorClearedCmd(const TArray<FString>& /*Args*/, UWorld* World)
@@ -1106,13 +1335,149 @@ void DungeonContractFreshSpawnerFailureCmd(const TArray<FString>& Args, UWorld* 
 	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
 	if (!FM || Args.Num() != 1)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ContractFreshSpawnerFailure <0|1>"));
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ContractFreshSpawnerFailure <0|1|2>"));
 		return;
 	}
-	const bool bForce = FCString::Atoi(*Args[0]) != 0;
-	FM->SetForceNoFreshSpawnerForTests(bForce);
-	UE_LOG(LogTemp, Display, TEXT("[RoomContractTest] freshSpawnerFailure=%s"),
-		bForce ? TEXT("true") : TEXT("false"));
+	const int32 Mode = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 2);
+	FM->SetFreshSpawnerFaultModeForTests(Mode);
+	UE_LOG(LogTemp, Display, TEXT("[RoomContractTest] freshSpawnerFault=%s"),
+		Mode == 0 ? TEXT("none") : (Mode == 1 ? TEXT("missing") : TEXT("ambiguous")));
+}
+
+void DungeonExitFreshSpawnerFailureCmd(const TArray<FString>& Args, UWorld* World)
+{
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!FM || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ExitFreshSpawnerFailure <0|1|2>"));
+		return;
+	}
+	const int32 Mode = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 2);
+	FM->SetExitFreshSpawnerFaultModeForTests(Mode);
+	UE_LOG(LogTemp, Display, TEXT("[ExitFreshSpawnerAuthorityTest] armed=%s oneShot=true"),
+		Mode == 0 ? TEXT("none") : (Mode == 1 ? TEXT("missing") : TEXT("ambiguous")));
+}
+
+void DungeonActiveThreatIdsCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	if (!Spawner)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[ActiveThreatSet] sourceFresh=false"));
+		return;
+	}
+	TArray<int64> Ids;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		const ADungeonEnemy* Enemy = *It;
+		if (IsValid(Enemy) && Enemy->GetOwningSpawner() == Spawner && Enemy->IsActiveThreat())
+		{
+			Ids.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		}
+	}
+	Ids.Sort();
+	TArray<FString> Parts;
+	for (const int64 Id : Ids)
+	{
+		Parts.Add(FString::Printf(TEXT("%lld"), Id));
+	}
+	UE_LOG(LogTemp, Display, TEXT("[ActiveThreatSet] sourceFresh=true count=%d ids=%s"),
+		Ids.Num(), *FString::Join(Parts, TEXT(",")));
+}
+
+void DungeonTogglePauseCmd(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+	{
+		FM->TogglePause();
+	}
+}
+
+void DungeonRecoveryProbeCmd(const TArray<FString>& Args, UWorld* World)
+{
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!FM || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.RecoveryProbe <fraction>"));
+		return;
+	}
+	const float Fraction = FMath::Clamp(FCString::Atof(*Args[0]), 0.0f, 1.0f);
+	FM->ApplyRecoveryForTests(Fraction, TEXT("test-probe"), -1);
+}
+
+void DungeonRoomClearProbeCmd(const TArray<FString>& Args, UWorld* World)
+{
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForEvidence(World);
+	if (!FM || !Spawner || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[DungeonEvidence] usage: Dungeon.RoomClearProbe <null-source|stale-source|ambiguous-source|wrong-role|invalid-room|bad-counts|duplicate>"));
+		return;
+	}
+	const FString Mode = Args[0].ToLower();
+	int32 Room = INDEX_NONE;
+	for (int32 Index = 0; Index < Spawner->GetRoomCount(); ++Index)
+	{
+		if (Spawner->GetInitialInRoom(Index) > 0
+			&& (Mode != TEXT("duplicate") || Spawner->GetAliveInRoom(Index) == 0))
+		{
+			Room = Index;
+			break;
+		}
+	}
+	const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+	const int32 Role = Roles.IsValidIndex(Room) ? Roles[Room] : INDEX_NONE;
+	const int32 Before = FM->GetClearedCombatRooms();
+	const int32 CachedAlive = Spawner->GetAliveInRoom(Room);
+	const bool bStageTrueClear = Mode == TEXT("stale-source")
+		|| Mode == TEXT("ambiguous-source") || Mode == TEXT("wrong-role");
+	if (bStageTrueClear && !Spawner->SetRoomAliveCountForTests(Room, 0))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RoomClearTest] probe=%s staged=false"), *Mode);
+		return;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[RoomClearTest] probe=%s room=%d role=%d before=%d"),
+		*Mode, Room, Role, Before);
+	if (Mode == TEXT("null-source"))
+	{
+		FM->NotifyRoomCleared(nullptr, Room, Role, 1, 0);
+	}
+	else if (Mode == TEXT("wrong-role"))
+	{
+		FM->NotifyRoomCleared(Spawner, Room, (Role + 1) % 4, 1, 0);
+	}
+	else if (Mode == TEXT("stale-source") || Mode == TEXT("ambiguous-source"))
+	{
+		FM->SetFreshSpawnerFaultModeForTests(Mode == TEXT("stale-source") ? 1 : 2);
+		FM->NotifyRoomCleared(Spawner, Room, Role, 1, 0);
+		FM->SetFreshSpawnerFaultModeForTests(0);
+	}
+	else if (Mode == TEXT("invalid-room"))
+	{
+		FM->NotifyRoomCleared(Spawner, -1, Role, 1, 0);
+	}
+	else if (Mode == TEXT("bad-counts"))
+	{
+		FM->NotifyRoomCleared(Spawner, Room, Role, CachedAlive, CachedAlive);
+	}
+	else if (Mode == TEXT("duplicate"))
+	{
+		FM->NotifyRoomCleared(Spawner, Room, Role, 1, 0);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RoomClearTest] unknown probe=%s"), *Mode);
+		if (bStageTrueClear) { Spawner->SetRoomAliveCountForTests(Room, CachedAlive); }
+		return;
+	}
+	if (bStageTrueClear)
+	{
+		Spawner->SetRoomAliveCountForTests(Room, CachedAlive);
+	}
+	UE_LOG(LogTemp, Display, TEXT("[RoomClearTest] probe=%s after=%d unchanged=%s"),
+		*Mode, FM->GetClearedCombatRooms(),
+		FM->GetClearedCombatRooms() == Before ? TEXT("true") : TEXT("false"));
 }
 
 void DungeonRouteFaultModeCmd(const TArray<FString>& Args, UWorld* World)
@@ -1297,7 +1662,7 @@ void DungeonRouteRespawnPawnCmd(const TArray<FString>& /*Args*/, UWorld* World)
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonExitWithdrawalFailureCmd(
 	TEXT("Dungeon.ExitWithdrawalFailure"),
-	TEXT("Development-only negative seam: force floor-exit withdrawal failure (0|1)"),
+	TEXT("Development-only one-shot exit seam: 0 normal, 1 fail after collection, 2 fail after preflight"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonExitWithdrawalFailureCmd));
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonNotifyFloorClearedCmd(
@@ -1327,8 +1692,33 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonContractFailureModeCmd(
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonContractFreshSpawnerFailureCmd(
 	TEXT("Dungeon.ContractFreshSpawnerFailure"),
-	TEXT("Development-only seam: make room-contract fresh-spawner lookup fail (0|1)"),
+	TEXT("Development-only fresh-spawner authority seam: 0 normal, 1 missing, 2 ambiguous"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonContractFreshSpawnerFailureCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonExitFreshSpawnerFailureCmd(
+	TEXT("Dungeon.ExitFreshSpawnerFailure"),
+	TEXT("Development-only one-shot exit authority seam: 0 normal, 1 missing, 2 ambiguous"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonExitFreshSpawnerFailureCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonActiveThreatIdsCmd(
+	TEXT("Dungeon.ActiveThreatIds"),
+	TEXT("Development-only readback of the sorted exact active-threat identity set"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonActiveThreatIdsCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonTogglePauseCmd(
+	TEXT("Dungeon.TogglePause"),
+	TEXT("Development-only trigger for the ordinary pause authority path"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonTogglePauseCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRecoveryProbeCmd(
+	TEXT("Dungeon.RecoveryProbe"),
+	TEXT("Development-only authoritative recovery exclusion probe: fraction"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRecoveryProbeCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonRoomClearProbeCmd(
+	TEXT("Dungeon.RoomClearProbe"),
+	TEXT("Development-only rejected callback probe: null-source|stale-source|ambiguous-source|wrong-role|invalid-room|bad-counts|duplicate"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonRoomClearProbeCmd));
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonRouteFaultModeCmd(
 	TEXT("Dungeon.RouteFaultMode"),

@@ -333,38 +333,25 @@ void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
 	{
 		return;
 	}
-	RoomAliveCounts[InRoomIndex] = FMath::Max(0, RoomAliveCounts[InRoomIndex] - 1);
+	const int32 OldAlive = RoomAliveCounts[InRoomIndex];
+	RoomAliveCounts[InRoomIndex] = FMath::Max(0, OldAlive - 1);
+	const int32 NewAlive = RoomAliveCounts[InRoomIndex];
 	UE_LOG(LogTemp, Display, TEXT("[Combat] enemy down in room=%d, alive=%d"),
-		InRoomIndex, RoomAliveCounts[InRoomIndex]);
+		InRoomIndex, NewAlive);
 
 	// Rooms that never had enemies (e.g. the start room) never fire RoomCleared.
-	if (RoomAliveCounts[InRoomIndex] == 0 && RoomInitialCounts[InRoomIndex] > 0)
+	if (OldAlive > 0 && NewAlive == 0 && RoomInitialCounts[InRoomIndex] > 0)
 	{
 		// Evidence (acceptance E).
 		UE_LOG(LogTemp, Display, TEXT("[RoomClear] room=%d cleared (initial=%d)"),
 			InRoomIndex, RoomInitialCounts[InRoomIndex]);
-
-		// If that was the last enemy room, the require-floor-clear gate just opened. The stairs
-		// overlap is edge-triggered but the gate is level-triggered, so a player standing on the
-		// pad when the final enemy falls would otherwise stay stuck until stepping off and back
-		// on. Re-poke the stairs to descend in place. Harmless under descend-anytime (the player
-		// would already have descended on overlap and the pad is gone).
-		if (AreAllRoomsCleared())
+		if (UWorld* World = GetWorld())
 		{
-			if (UWorld* World = GetWorld())
+			if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
 			{
-				// M5: offer the floor-clear reward BEFORE re-poking the stairs. NotifyFloorCleared() sets
-				// RewardPending (unless this is the final floor), so the re-poke below is intentionally
-				// blocked by the reward gate until the player picks - the reward can't be skipped by the
-				// auto-descend for a player already standing on the pad.
-				if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
-				{
-					FM->NotifyFloorCleared();
-				}
-				for (TActorIterator<ADungeonStairs> It(World); It; ++It)
-				{
-					It->OnFloorCleared();
-				}
+				const int32 CachedRole = CachedRoomRoles.IsValidIndex(InRoomIndex)
+					? CachedRoomRoles[InRoomIndex] : INDEX_NONE;
+				FM->NotifyRoomCleared(this, InRoomIndex, CachedRole, OldAlive, NewAlive);
 			}
 		}
 	}
@@ -374,17 +361,23 @@ FFloorExitNeutralizationResult ADungeonSpawner::DeactivateRemainingEnemiesForExi
 {
 	FFloorExitNeutralizationResult Result;
 	UWorld* World = GetWorld();
-	if (!World || !World->IsGameWorld())
+	if (!World || !World->IsGameWorld() || !bEncounterAssigned
+		|| EncounterFloorIndex != InFloorIndex)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[FloorExitSafe] floor=%d rejected=no-game-world"), InFloorIndex);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=collection reason=stale-source"),
+			InFloorIndex);
 		return Result;
 	}
 
-	bool bForcePartialFailure = false;
+	int32 FailureMode = 0;
 #if !UE_BUILD_SHIPPING
-	bForcePartialFailure = bForceExitWithdrawalFailureForTests;
+	FailureMode = ExitWithdrawalFailureModeForTests;
+	ExitWithdrawalFailureModeForTests = 0;
 #endif
-	int32 TestNeutralizeBudget = bForcePartialFailure ? 1 : MAX_int32;
+	Result.ExpectedActive = GetTotalAliveEnemies();
+	TArray<TWeakObjectPtr<ADungeonEnemy>> Targets;
+	TSet<int64> UniqueIds;
 
 	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
 	{
@@ -394,22 +387,89 @@ FFloorExitNeutralizationResult ADungeonSpawner::DeactivateRemainingEnemiesForExi
 		{
 			continue;
 		}
+		const int64 Id = static_cast<int64>(Enemy->GetUniqueID());
+		if (UniqueIds.Contains(Id))
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("[FloorExitTxn] floor=%d success=false phase=collection reason=duplicate-identity id=%lld"),
+				InFloorIndex, Id);
+			return Result;
+		}
+		UniqueIds.Add(Id);
+		Targets.Add(Enemy);
+		Result.CollectedIds.Add(Id);
+		++Result.Collected;
+	}
+	Result.CollectedIds.Sort();
+	TArray<FString> CollectedIdStrings;
+	for (const int64 Id : Result.CollectedIds)
+	{
+		CollectedIdStrings.Add(FString::Printf(TEXT("%lld"), Id));
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorExitTxnSet] floor=%d phase=collection count=%d ids=%s"),
+		InFloorIndex, Result.CollectedIds.Num(), *FString::Join(CollectedIdStrings, TEXT(",")));
+	// No mutation has occurred; the collected active set is still the exact remaining set.
+	Result.RemainingActive = Result.Collected;
+	Result.bCollectionPassed = Result.Collected == Result.ExpectedActive;
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorExitTxn] floor=%d phase=collection expected=%d collected=%d passed=%s fault=%d"),
+		InFloorIndex, Result.ExpectedActive, Result.Collected,
+		Result.bCollectionPassed ? TEXT("true") : TEXT("false"), FailureMode);
+	if (!Result.bCollectionPassed || FailureMode == 1)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=collection reason=%s expected=%d collected=%d neutralized=0 destroyQueued=0 remainingActive=%d residualPrepared=0"),
+			InFloorIndex, FailureMode == 1 ? TEXT("forced-after-collection") : TEXT("count-mismatch"),
+			Result.ExpectedActive, Result.Collected, Result.RemainingActive);
+		return Result;
+	}
 
-		++Result.Eligible;
-		if (TestNeutralizeBudget <= 0)
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		ADungeonEnemy* Enemy = WeakEnemy.Get();
+		if (!IsValid(Enemy) || Enemy->GetWorld() != World
+			|| Enemy->GetOwningSpawner() != this || !Enemy->IsActiveThreat())
 		{
-			continue;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[FloorExitTxn] floor=%d success=false phase=preflight reason=identity-changed expected=%d collected=%d preflighted=%d neutralized=0 destroyQueued=0 remainingActive=%d residualPrepared=0"),
+				InFloorIndex, Result.ExpectedActive, Result.Collected, Result.Preflighted,
+				Result.RemainingActive);
+			return Result;
 		}
+		++Result.Preflighted;
+	}
+	Result.bPreflightPassed = Result.Preflighted == Result.ExpectedActive;
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorExitTxn] floor=%d phase=preflight expected=%d preflighted=%d passed=%s fault=%d"),
+		InFloorIndex, Result.ExpectedActive, Result.Preflighted,
+		Result.bPreflightPassed ? TEXT("true") : TEXT("false"), FailureMode);
+	if (!Result.bPreflightPassed || FailureMode == 2)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=preflight reason=%s expected=%d collected=%d preflighted=%d neutralized=0 destroyQueued=0 remainingActive=%d residualPrepared=0"),
+			InFloorIndex, FailureMode == 2 ? TEXT("forced-after-preflight") : TEXT("count-mismatch"),
+			Result.ExpectedActive, Result.Collected, Result.Preflighted, Result.RemainingActive);
+		return Result;
+	}
+
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		ADungeonEnemy* Enemy = WeakEnemy.Get();
 		bool bDestroyQueued = false;
-		if (Enemy->NeutralizeForFloorExit(bDestroyQueued))
+		if (!Enemy || !Enemy->NeutralizeForFloorExit(bDestroyQueued))
 		{
-			++Result.Neutralized;
-			Result.DestroyQueued += bDestroyQueued ? 1 : 0;
-			--TestNeutralizeBudget;
+			UE_LOG(LogTemp, Error,
+				TEXT("[FloorExitTxn] floor=%d success=false phase=commit reason=preflighted-enemy-rejected neutralized=%d"),
+				InFloorIndex, Result.Neutralized);
+			break;
 		}
+		++Result.Neutralized;
+		Result.DestroyQueued += bDestroyQueued ? 1 : 0;
 	}
 
 	// Destroy is deferred; the synchronous active-threat state is the safety authority.
+	Result.RemainingActive = 0;
 	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
 	{
 		const ADungeonEnemy* Enemy = *It;
@@ -420,19 +480,21 @@ FFloorExitNeutralizationResult ADungeonSpawner::DeactivateRemainingEnemiesForExi
 		}
 	}
 
-	Result.bSuccess = Result.Eligible == Result.Neutralized && Result.RemainingActive == 0;
+	Result.bSuccess = Result.Neutralized == Result.ExpectedActive
+		&& Result.RemainingActive == 0 && Result.ResidualPrepared == 0;
 	if (Result.bSuccess)
 	{
 		UE_LOG(LogTemp, Display,
-			TEXT("[FloorExitSafe] floor=%d eligible=%d neutralized=%d destroyQueued=%d remainingActive=%d success=true"),
-			InFloorIndex, Result.Eligible, Result.Neutralized, Result.DestroyQueued, Result.RemainingActive);
+			TEXT("[FloorExitTxn] floor=%d success=true phase=commit expected=%d collected=%d preflighted=%d neutralized=%d destroyQueued=%d remainingActive=%d residualPrepared=%d"),
+			InFloorIndex, Result.ExpectedActive, Result.Collected, Result.Preflighted,
+			Result.Neutralized, Result.DestroyQueued, Result.RemainingActive, Result.ResidualPrepared);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[FloorExitSafe] floor=%d eligible=%d neutralized=%d destroyQueued=%d remainingActive=%d success=false forcedPartial=%s"),
-			InFloorIndex, Result.Eligible, Result.Neutralized, Result.DestroyQueued, Result.RemainingActive,
-			bForcePartialFailure ? TEXT("true") : TEXT("false"));
+		UE_LOG(LogTemp, Error,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=commit expected=%d neutralized=%d destroyQueued=%d remainingActive=%d residualPrepared=%d"),
+			InFloorIndex, Result.ExpectedActive, Result.Neutralized, Result.DestroyQueued,
+			Result.RemainingActive, Result.ResidualPrepared);
 	}
 	return Result;
 }

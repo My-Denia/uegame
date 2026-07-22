@@ -18,11 +18,17 @@ class UInstancedStaticMeshComponent;
 
 struct FFloorExitNeutralizationResult
 {
-	int32 Eligible = 0;
+	int32 ExpectedActive = 0;
+	int32 Collected = 0;
+	int32 Preflighted = 0;
 	int32 Neutralized = 0;
 	int32 DestroyQueued = 0;
 	int32 RemainingActive = 0;
+	int32 ResidualPrepared = 0;
+	bool bCollectionPassed = false;
+	bool bPreflightPassed = false;
 	bool bSuccess = false;
+	TArray<int64> CollectedIds;
 };
 
 struct FChallengeContractTransactionResult
@@ -126,10 +132,23 @@ public:
 	/** Preflight the full live room set, then apply all-or-rollback Challenge modifiers. */
 	FChallengeContractTransactionResult ApplyChallengeContractTransactional(int32 InRoomIndex);
 #if !UE_BUILD_SHIPPING
-	/** Negative-test seam. Compiled out of Shipping with the evidence verbs that call it. */
-	void SetForceExitWithdrawalFailureForTests(bool bForce) { bForceExitWithdrawalFailureForTests = bForce; }
+	/** Pre-mutation negative seam: 0=off, 1=fail after collection, 2=fail after preflight. */
+	void SetExitWithdrawalFailureModeForTests(int32 Mode)
+	{
+		ExitWithdrawalFailureModeForTests = FMath::Clamp(Mode, 0, 2);
+	}
 	/** 0=none, 1=stale preflight, 2=partial apply followed by required rollback. */
 	void SetChallengeContractFailureModeForTests(int32 Mode) { ChallengeContractFailureModeForTests = Mode; }
+	/** Evidence-only cache staging for isolated callback validation; caller must restore it. */
+	bool SetRoomAliveCountForTests(int32 RoomIndex, int32 Alive)
+	{
+		if (!RoomAliveCounts.IsValidIndex(RoomIndex))
+		{
+			return false;
+		}
+		RoomAliveCounts[RoomIndex] = FMath::Clamp(Alive, 0, RoomInitialCounts[RoomIndex]);
+		return true;
+	}
 #endif
 
 	int32 GetRoomCount() const { return RoomCentersWorld.Num(); }
@@ -144,6 +163,24 @@ public:
 	int32 GetInitialInRoom(int32 InRoomIndex) const
 	{
 		return RoomInitialCounts.IsValidIndex(InRoomIndex) ? RoomInitialCounts[InRoomIndex] : 0;
+	}
+	int32 GetActualEnemyRoomCount() const
+	{
+		int32 Count = 0;
+		for (const int32 Initial : RoomInitialCounts)
+		{
+			Count += Initial > 0 ? 1 : 0;
+		}
+		return Count;
+	}
+	int32 GetTotalAliveEnemies() const
+	{
+		int32 Count = 0;
+		for (const int32 Alive : RoomAliveCounts)
+		{
+			Count += FMath::Max(0, Alive);
+		}
+		return Count;
 	}
 	int32 GetStartRoomIndex() const { return StartRoomIndex; }
 
@@ -238,7 +275,7 @@ private:
 	TArray<FIntVector> CachedRoomTypeCounts;
 	FIntVector CachedTypeTally = FIntVector::ZeroValue;
 #if !UE_BUILD_SHIPPING
-	bool bForceExitWithdrawalFailureForTests = false;
+	int32 ExitWithdrawalFailureModeForTests = 0;
 	int32 ChallengeContractFailureModeForTests = 0;
 #endif
 };

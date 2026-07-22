@@ -23,6 +23,7 @@
 // Engine-agnostic seed pipeline (repo root include path; .cpp-only include).
 #include "m2_adapter.hpp"
 #include "m8_room_contract.hpp"
+#include "m8_room_flow.hpp"
 
 #include <vector>
 
@@ -33,6 +34,41 @@ namespace
 	// first-run seed is now entropy (ResolveFirstRunSeed). Restarts chain deterministically
 	// via m2::nextRunSeed regardless of how the first seed was picked.
 	constexpr uint64 kDemoRunSeed = 7;
+
+	m8room::Config GetRoomFlowConfig(const FCombatConfigRow& Cfg)
+	{
+		return {{
+			Cfg.QuietRoomClearHealFraction,
+			Cfg.StandardRoomClearHealFraction,
+			Cfg.SkirmishRoomClearHealFraction,
+			Cfg.StrongholdRoomClearHealFraction
+		}, Cfg.RewardRecoveryFloorFraction,
+			Cfg.RequiredCombatRoomsBase, Cfg.RequiredCombatRoomsPerFloor};
+	}
+
+	m8contract::Choice ToCoreContractChoice(EUegameRoomContractChoice Choice)
+	{
+		switch (Choice)
+		{
+		case EUegameRoomContractChoice::Pending: return m8contract::Choice::Pending;
+		case EUegameRoomContractChoice::Secure: return m8contract::Choice::Secure;
+		case EUegameRoomContractChoice::Challenge: return m8contract::Choice::Challenge;
+		case EUegameRoomContractChoice::Unavailable:
+		default: return m8contract::Choice::Unavailable;
+		}
+	}
+
+	const TCHAR* InputOwnerName(m8contract::InputOwner Owner)
+	{
+		switch (Owner)
+		{
+		case m8contract::InputOwner::PauseMenu: return TEXT("PauseMenu");
+		case m8contract::InputOwner::Contract: return TEXT("Contract");
+		case m8contract::InputOwner::Reward: return TEXT("Reward");
+		case m8contract::InputOwner::None:
+		default: return TEXT("None");
+		}
+	}
 
 	std::vector<std::int64_t> ToContractIds(const TArray<int64>& Ids)
 	{
@@ -152,8 +188,11 @@ ADungeonSpawner* UUegameFloorManager::FindSpawner() const
 ADungeonSpawner* UUegameFloorManager::FindUniqueFreshSpawnerForCurrentFloor() const
 {
 #if !UE_BUILD_SHIPPING
-	if (bForceNoFreshSpawnerForTests)
+	if (FreshSpawnerFaultModeForTests != 0)
 	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FreshSpawnerAuthorityTest] forced=%s"),
+			FreshSpawnerFaultModeForTests == 1 ? TEXT("missing") : TEXT("ambiguous"));
 		return nullptr;
 	}
 #endif
@@ -180,6 +219,11 @@ ADungeonSpawner* UUegameFloorManager::FindUniqueFreshSpawnerForCurrentFloor() co
 		Match = Candidate;
 	}
 	return Match;
+}
+
+bool UUegameFloorManager::IsUniqueFreshSource(const ADungeonSpawner* SourceSpawner) const
+{
+	return SourceSpawner && FindUniqueFreshSpawnerForCurrentFloor() == SourceSpawner;
 }
 
 void UUegameFloorManager::HealPlayerFull() const
@@ -248,9 +292,15 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 	FloorIndex = NewFloorIndex;
+	ClearedCombatRooms = 0;
+	RequiredCombatRooms = 0;
+	ActualCombatRooms = 0;
+	ClearedRoomIndices.Reset();
 	bFloorObjectiveComplete = false;
 	bFloorExitThreatsWithdrawn = false;
 	bExitSafetyBlocked = false;
+	AbandonedCombatRooms = 0;
+	ExitNeutralizedEnemies = 0;
 
 	const uint64 FloorSeed = m2::deriveFloorSeed(RunSeed, FloorIndex);
 	const double Mult = m2::floorMultiplier(FloorIndex, Cfg.PerFloorScaling);
@@ -264,6 +314,12 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		Cfg.EnemiesPerRoom, Cfg.EnemyMaxHP, Cfg.PerFloorScaling);
 
 	Spawner->RegenerateFloor(FloorSeed, EffPerRoom, EffHP);
+	ActualCombatRooms = FMath::Max(0, Spawner->GetActualEnemyRoomCount());
+	RequiredCombatRooms = m8room::required_combat_rooms(
+		FloorIndex, Cfg.MaxFloors, ActualCombatRooms, GetRoomFlowConfig(Cfg));
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorObjective] floor=%d cleared=0 required=%d actual=%d completed=false exitSafe=false"),
+		FloorIndex, RequiredCombatRooms, ActualCombatRooms);
 	InitializeRoomContract(Spawner);
 
 	// Evidence (acceptance E): HP persistence is visible here - the pawn survives the
@@ -284,6 +340,11 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		static_cast<unsigned long long>(RunSeed),
 		static_cast<unsigned long long>(FloorSeed),
 		PawnHP, PawnMax);
+
+	if (RequiredCombatRooms == 0)
+	{
+		NotifyFloorCleared();
+	}
 }
 
 void UUegameFloorManager::RequestDescend(bool bForce)
@@ -305,12 +366,10 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 		return;
 	}
 
-	ADungeonSpawner* Spawner = FindSpawner();
-
 	// A prior withdrawal failure is recoverable. Once the ordinary all-clear condition is
 	// true, retry the same atomic completion path before deciding whether the exit is safe.
-	if (!bForce && !bFloorObjectiveComplete && Spawner
-		&& (bExitSafetyBlocked || Spawner->AreAllRoomsCleared()))
+	if (!bForce && !bFloorObjectiveComplete
+		&& (bExitSafetyBlocked || CanCompleteCurrentFloor()))
 	{
 		NotifyFloorCleared();
 	}
@@ -452,6 +511,8 @@ void UUegameFloorManager::ClearRoomContractState()
 	bChallengeContractDisabled = false;
 	RoomContractWarning = EUegameRoomContractWarning::None;
 	RoomContractCommitCount = 0;
+	bRoomContractSelectedRoomCleared = false;
+	bRoomContractAwarded = false;
 }
 
 void UUegameFloorManager::EnterTerminalState(m8authority::RunEvent Event, const TCHAR* LogAnchor)
@@ -624,25 +685,67 @@ void UUegameFloorManager::InitializeRoomContract(ADungeonSpawner* Spawner)
 
 void UUegameFloorManager::ApplyContractHeal(float Fraction, const TCHAR* Reason, int32 RoomIndex) const
 {
+	ApplyRecoveryFraction(Fraction, Reason, RoomIndex);
+}
+
+void UUegameFloorManager::ApplyRecoveryFraction(float Fraction, const TCHAR* Reason, int32 RoomIndex) const
+{
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
 	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
 	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
 	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
 	if (!HP || HP->IsDead())
 	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[RecoveryTxn] floor=%d room=%d reason=%s applied=false deadOrMissing=true"),
+			FloorIndex, RoomIndex, Reason);
 		return;
 	}
 	const float Before = HP->GetHP();
-	const float Applied = HP->Heal(HP->GetMaxHP() * Fraction);
+	const float MaxHP = HP->GetMaxHP();
+	const float Nominal = MaxHP * FMath::Clamp(Fraction, 0.0f, 1.0f);
+	const float Applied = HP->Heal(Nominal);
+	const float After = HP->GetHP();
+	const bool bClamped = Applied + KINDA_SMALL_NUMBER < Nominal;
 	UE_LOG(LogTemp, Display,
-		TEXT("[RoomContractHeal] floor=%d room=%d reason=%s before=%.1f applied=%.1f after=%.1f"),
-		FloorIndex, RoomIndex, Reason, Before, Applied, HP->GetHP());
+		TEXT("[RecoveryTxn] floor=%d room=%d reason=%s before=%.1f max=%.1f nominal=%.1f applied=%.1f after=%.1f clamped=%s"),
+		FloorIndex, RoomIndex, Reason, Before, MaxHP, Nominal, Applied, After,
+		bClamped ? TEXT("true") : TEXT("false"));
+}
+
+void UUegameFloorManager::ApplyPostRewardRecovery() const
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!HP || HP->IsDead())
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[RecoveryTxn] floor=%d room=-1 reason=reward-floor applied=false deadOrMissing=true"),
+			FloorIndex);
+		return;
+	}
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	const m8room::Recovery Planned = m8room::apply_reward_floor(
+		HP->GetHP(), HP->GetMaxHP(), GetRoomFlowConfig(Cfg));
+	const float Before = HP->GetHP();
+	const float MaxHP = HP->GetMaxHP();
+	const float Applied = HP->Heal(static_cast<float>(Planned.restored));
+	const float After = HP->GetHP();
+	const bool bClamped = Applied + KINDA_SMALL_NUMBER < static_cast<float>(Planned.restored);
+	UE_LOG(LogTemp, Display,
+		TEXT("[RecoveryTxn] floor=%d room=-1 reason=reward-floor before=%.1f max=%.1f nominal=%.1f applied=%.1f after=%.1f clamped=%s"),
+		FloorIndex, Before, MaxHP, static_cast<float>(Planned.restored), Applied, After,
+		bClamped ? TEXT("true") : TEXT("false"));
 }
 
 void UUegameFloorManager::ResolveRoomContractUnavailable(const TCHAR* Reason)
 {
 	RoomContractChoice = EUegameRoomContractChoice::Unavailable;
 	SelectedContractRoom = INDEX_NONE;
+	bRoomContractSelectedRoomCleared = false;
+	bRoomContractAwarded = false;
 	RoomContractWarning = EUegameRoomContractWarning::Unavailable;
 	RefreshWorldPause();
 	UE_LOG(LogTemp, Error,
@@ -695,6 +798,8 @@ bool UUegameFloorManager::CommitSecureContract(
 
 	SelectedContractRoom = Room;
 	RoomContractChoice = EUegameRoomContractChoice::Secure;
+	bRoomContractSelectedRoomCleared = false;
+	bRoomContractAwarded = false;
 	bChallengeContractDisabled = bFallback;
 	RoomContractWarning = bFallback
 		? EUegameRoomContractWarning::SecureFallback
@@ -767,6 +872,8 @@ bool UUegameFloorManager::TryCommitRoomContract(int32 Index)
 	{
 		SelectedContractRoom = ChallengeContractRoom;
 		RoomContractChoice = EUegameRoomContractChoice::Challenge;
+		bRoomContractSelectedRoomCleared = false;
+		bRoomContractAwarded = false;
 		++RoomContractCommitCount;
 		RefreshWorldPause();
 		UE_LOG(LogTemp, Display,
@@ -789,24 +896,121 @@ bool UUegameFloorManager::TryCommitRoomContract(int32 Index)
 	return CommitSecureContract(Spawner, true, TEXT("partial-challenge-apply"));
 }
 
+bool UUegameFloorManager::CanCompleteCurrentFloor() const
+{
+	return m8contract::can_complete_floor(
+		bFloorObjectiveComplete, ClearedCombatRooms, RequiredCombatRooms,
+		ToCoreContractChoice(RoomContractChoice), bRoomContractSelectedRoomCleared);
+}
+
+void UUegameFloorManager::NotifyRoomCleared(
+	ADungeonSpawner* SourceSpawner, int32 RoomIndex, int32 CachedRole,
+	int32 OldAlive, int32 NewAlive)
+{
+	const bool bRoomValid = SourceSpawner
+		&& RoomIndex >= 0 && RoomIndex < SourceSpawner->GetRoomCount()
+		&& SourceSpawner->GetInitialInRoom(RoomIndex) > 0
+		&& SourceSpawner->GetAliveInRoom(RoomIndex) == NewAlive;
+	const TArray<int32>* Roles = SourceSpawner ? &SourceSpawner->GetCachedRoomRoles() : nullptr;
+	const bool bRoleValid = Roles && Roles->IsValidIndex(RoomIndex)
+		&& (*Roles)[RoomIndex] == CachedRole && CachedRole >= 0 && CachedRole <= 3;
+	const bool bFirstTrueClear = OldAlive > 0 && NewAlive == 0
+		&& !ClearedRoomIndices.Contains(RoomIndex);
+	if (!bRunActive || !IsUniqueFreshSource(SourceSpawner)
+		|| !bRoomValid || !bRoleValid || !bFirstTrueClear)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RoomClearRejected] floor=%d room=%d role=%d old=%d new=%d sourceFresh=%s roomValid=%s roleValid=%s firstTrue=%s"),
+			FloorIndex, RoomIndex, CachedRole, OldAlive, NewAlive,
+			IsUniqueFreshSource(SourceSpawner) ? TEXT("true") : TEXT("false"),
+			bRoomValid ? TEXT("true") : TEXT("false"),
+			bRoleValid ? TEXT("true") : TEXT("false"),
+			bFirstTrueClear ? TEXT("true") : TEXT("false"));
+		return;
+	}
+
+	ClearedRoomIndices.Add(RoomIndex);
+	ClearedCombatRooms = FMath::Min(ActualCombatRooms, ClearedCombatRooms + 1);
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	const float RoleFraction = static_cast<float>(m8room::room_fraction(
+		static_cast<m8room::Role>(CachedRole), GetRoomFlowConfig(Cfg)));
+	ApplyRecoveryFraction(RoleFraction, TEXT("role-clear"), RoomIndex);
+
+	if (IsRoomContractSelected() && RoomIndex == SelectedContractRoom
+		&& !bRoomContractSelectedRoomCleared)
+	{
+		bRoomContractSelectedRoomCleared = true;
+		if (IsRoomContractChallenge() && !bRoomContractAwarded)
+		{
+			ApplyRecoveryFraction(0.50f, TEXT("challenge-clear"), RoomIndex);
+			bRoomContractAwarded = true;
+			UE_LOG(LogTemp, Display,
+				TEXT("[RoomContractAward] floor=%d room=%d choice=Challenge healFraction=0.50 awarded=true"),
+				FloorIndex, RoomIndex);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[RoomContractResolved] floor=%d room=%d choice=Secure awarded=false"),
+				FloorIndex, RoomIndex);
+		}
+	}
+
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorObjective] floor=%d cleared=%d required=%d actual=%d contractRoom=%d contractResolved=%s completed=false"),
+		FloorIndex, ClearedCombatRooms, RequiredCombatRooms, ActualCombatRooms,
+		SelectedContractRoom, bRoomContractSelectedRoomCleared ? TEXT("true") : TEXT("false"));
+	if (CanCompleteCurrentFloor())
+	{
+		NotifyFloorCleared();
+	}
+}
+
 void UUegameFloorManager::NotifyFloorCleared()
 {
 	if (!bRunActive || bFloorObjectiveComplete)
 	{
 		return;
 	}
+	if (!CanCompleteCurrentFloor())
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[FloorObjective] floor=%d cleared=%d required=%d actual=%d contractRoom=%d contractResolved=%s transition=blocked-or-repeat"),
+			FloorIndex, ClearedCombatRooms, RequiredCombatRooms, ActualCombatRooms,
+			SelectedContractRoom, bRoomContractSelectedRoomCleared ? TEXT("true") : TEXT("false"));
+		return;
+	}
 
-	ADungeonSpawner* Spawner = FindSpawner();
+	ADungeonSpawner* Spawner = nullptr;
+#if !UE_BUILD_SHIPPING
+	const int32 ExitAuthorityFault = ExitFreshSpawnerFaultModeForTests;
+	ExitFreshSpawnerFaultModeForTests = 0;
+	if (ExitAuthorityFault != 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ExitFreshSpawnerAuthorityTest] forced=%s oneShot=true"),
+			ExitAuthorityFault == 1 ? TEXT("missing") : TEXT("ambiguous"));
+	}
+	else
+#endif
+	{
+		Spawner = FindUniqueFreshSpawnerForCurrentFloor();
+	}
+	const uint64 AttemptRunSeed = RunSeed;
+	const int32 AttemptFloor = FloorIndex;
 	FFloorExitNeutralizationResult Withdrawal;
 	if (Spawner)
 	{
 		Withdrawal = Spawner->DeactivateRemainingEnemiesForExit(FloorIndex);
 	}
+	const bool bProvenanceStillCurrent = bRunActive
+		&& RunSeed == AttemptRunSeed && FloorIndex == AttemptFloor
+		&& IsUniqueFreshSource(Spawner);
 
 	m8authority::ExitInput Exit;
 	Exit.objective_progress = 1;
 	Exit.objective_threshold = 1;
-	Exit.withdrawal = Withdrawal.bSuccess
+	Exit.withdrawal = Withdrawal.bSuccess && bProvenanceStillCurrent
 		? m8authority::WithdrawalState::Succeeded
 		: m8authority::WithdrawalState::Failed;
 	Exit.reward = m8authority::RewardState::Unavailable;
@@ -817,39 +1021,41 @@ void UUegameFloorManager::NotifyFloorCleared()
 		bFloorObjectiveComplete = false;
 		bFloorExitThreatsWithdrawn = false;
 		UE_LOG(LogTemp, Error,
-			TEXT("[FloorObjective] floor=%d complete=false exitSafe=false reward=false retry=stairs"),
-			FloorIndex);
+			TEXT("[FloorObjective] floor=%d cleared=%d required=%d complete=false exitSafe=false exitBlocked=true reward=false provenanceCurrent=%s collected=%d preflighted=%d neutralized=%d destroyQueued=%d remainingActive=%d retry=stairs"),
+			FloorIndex, ClearedCombatRooms, RequiredCombatRooms,
+			bProvenanceStillCurrent ? TEXT("true") : TEXT("false"),
+			Withdrawal.Collected, Withdrawal.Preflighted, Withdrawal.Neutralized,
+			Withdrawal.DestroyQueued, Withdrawal.RemainingActive);
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Red,
-				TEXT("EXIT NOT SAFE - threats could not withdraw. Try the stairs again."));
+				TEXT("EXIT BLOCKED - safety check failed. Try the stairs again."));
 		}
 		return;
 	}
 
-	// Commit the paired facts together only after neutralization is proven. Reward creation
-	// and stairs progression are downstream of this point and cannot observe a half-state.
 	bFloorExitThreatsWithdrawn = true;
 	bFloorObjectiveComplete = true;
 	bExitSafetyBlocked = false;
+	AbandonedCombatRooms = FMath::Max(0, ActualCombatRooms - ClearedCombatRooms);
+	ExitNeutralizedEnemies = Withdrawal.Neutralized;
 	UE_LOG(LogTemp, Display,
-		TEXT("[FloorObjective] floor=%d complete=true exitSafe=true rewardEligible=true"), FloorIndex);
+		TEXT("[FloorObjective] floor=%d cleared=%d required=%d actual=%d complete=true exitSafe=true abandonedRooms=%d neutralized=%d rewardEligible=true"),
+		FloorIndex, ClearedCombatRooms, RequiredCombatRooms, ActualCombatRooms,
+		AbandonedCombatRooms, ExitNeutralizedEnemies);
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 
-	// Final floor owes no reward: a pre-win offer would be useless (there is no next floor to spend it on),
-	// so leave RewardPending false and let the normal descend -> [RunWon] path run.
 	if (FloorIndex >= Cfg.MaxFloors)
 	{
 		UE_LOG(LogTemp, Display,
 			TEXT("[Loadout] floor=%d is the final floor (maxFloors=%d); no reward offer, win path proceeds"),
 			FloorIndex, Cfg.MaxFloors);
+		RepokeStairsForDescend();
 		return;
 	}
 
 	if (ULoadoutComponent* LC = FindPlayerLoadout())
 	{
-		// Sets RewardPending=true and logs/prints the 3-choose-1 offer. The offer is a pure function of
-		// (runSeed, floorIndex, offerIndex, pool, chosenIds) - it consumes no layout/enemy/floor RNG stream.
 		LC->GenerateOfferForFloor(RunSeed, FloorIndex);
 	}
 	else
@@ -857,6 +1063,7 @@ void UUegameFloorManager::NotifyFloorCleared()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[Loadout] floor %d cleared but the player has no loadout component; no reward offered"), FloorIndex);
 	}
+	RepokeStairsForDescend();
 }
 
 void UUegameFloorManager::TryChooseLoadout(int32 Index)
@@ -870,6 +1077,12 @@ void UUegameFloorManager::TryChooseLoadout(int32 Index)
 	const m8contract::Dispatch Dispatch = m8contract::dispatch_slot(
 		RuntimeLifecycle.state == m8authority::RunState::Paused,
 		IsRoomContractPending(), LC && LC->IsRewardPending(), Index);
+	UE_LOG(LogTemp, Display,
+		TEXT("[InputDispatch] floor=%d state=%d index=%d owner=%s accepted=%s contractPending=%s rewardPending=%s"),
+		FloorIndex, static_cast<int32>(RuntimeLifecycle.state), Index,
+		InputOwnerName(Dispatch.owner), Dispatch.accepted ? TEXT("true") : TEXT("false"),
+		IsRoomContractPending() ? TEXT("true") : TEXT("false"),
+		LC && LC->IsRewardPending() ? TEXT("true") : TEXT("false"));
 	if (Dispatch.owner == m8contract::InputOwner::PauseMenu)
 	{
 		return;
@@ -896,6 +1109,8 @@ void UUegameFloorManager::TryChooseLoadout(int32 Index)
 	{
 		return;   // invalid index or nothing pending - ChooseOffer already logged the reason
 	}
+	// The pick resolves MaxHP first; recovery then uses that authoritative new ceiling.
+	ApplyPostRewardRecovery();
 	// Reward taken -> RewardPending is now false. Re-poke the stairs so a player already standing on the pad
 	// descends immediately (otherwise they descend on the next overlap when they step onto the pad).
 	RepokeStairsForDescend();

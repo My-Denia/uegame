@@ -759,15 +759,18 @@ void AUegameHUD::DrawHUD()
 		}
 		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Secure)
 		{
-			Right.Add({ FString::Printf(TEXT("Contract   SECURE R%d"), FM->GetSelectedContractRoom()), kBody });
+			Right.Add({ FString::Printf(TEXT("Contract   SECURE R%d  +25%% HP now"), FM->GetSelectedContractRoom()), kBody });
 		}
 		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Challenge)
 		{
-			Right.Add({ FString::Printf(TEXT("Contract   CHALLENGE R%d"), FM->GetSelectedContractRoom()), kAccent });
+			Right.Add({ FString::Printf(TEXT("Contract   CHALLENGE R%d  +50%% HP on clear"), FM->GetSelectedContractRoom()), kAccent });
 		}
-		Right.Add({ FString::Printf(TEXT("Exit       objective %s  safe %s"),
+		Right.Add({ FString::Printf(TEXT("Rooms      %d / %d required  (%d total)"),
+			FM->GetClearedCombatRooms(), FM->GetRequiredCombatRooms(), FM->GetActualCombatRooms()), kBody });
+		Right.Add({ FString::Printf(TEXT("Exit       objective %s  safe %s  skipped %d"),
 			FM->IsFloorObjectiveComplete() ? TEXT("READY") : TEXT("OPEN"),
-			FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO")),
+			FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO"),
+			FM->GetAbandonedCombatRooms()),
 			FM->IsProgressionBlockedByExitSafety() ? kAccent : kDim });
 	}
 	else
@@ -903,9 +906,16 @@ void AUegameHUD::DrawHUD()
 		if (FM->IsRoomContractPending())
 		{
 			Center.Add({ TEXT("ROOM CONTRACT"), kAccent });
-			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  Recover now / [2] CHALLENGE R%d  Greater reward, stronger threats"),
-				FM->GetSecureContractRoom(), FM->GetChallengeContractRoom()), kBody });
+			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  +25%% HP NOW"),
+				FM->GetSecureContractRoom()), kBody });
+			Center.Add({ FString::Printf(TEXT("[2] CHALLENGE R%d  Stronger threats, +50%% HP AFTER CLEAR"),
+				FM->GetChallengeContractRoom()), kAccent });
 			Center.Add({ TEXT("Choose 1 or 2 to begin this floor"), kDim });
+		}
+		else if (FM->IsProgressionBlockedByExitSafety())
+		{
+			Center.Add({ TEXT("EXIT BLOCKED - SAFETY CHECK FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+			Center.Add({ TEXT("Try the stairs again"), kBody });
 		}
 		else if (FM->HasRoomContractFallbackWarning())
 		{

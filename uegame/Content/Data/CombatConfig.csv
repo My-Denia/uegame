@@ -1,2 +1,2 @@
----,EnemyMaxHP,EnemyMoveSpeed,EnemyContactDamage,EnemyDamageInterval,AggroRange,LeashRange,PlayerMaxHP,PlayerAttackDamage,PlayerAttackRange,PlayerAttackCooldown,EnemiesPerRoom,PerFloorScaling,bRequireFloorClearToDescend,MaxFloors
-Default,30,240,7,1.5,900,1400,140,15,250,0.6,2,0.5,true,3
+---,EnemyMaxHP,EnemyMoveSpeed,EnemyContactDamage,EnemyDamageInterval,AggroRange,LeashRange,PlayerMaxHP,PlayerAttackDamage,PlayerAttackRange,PlayerAttackCooldown,EnemiesPerRoom,PerFloorScaling,QuietRoomClearHealFraction,StandardRoomClearHealFraction,SkirmishRoomClearHealFraction,StrongholdRoomClearHealFraction,RewardRecoveryFloorFraction,RequiredCombatRoomsBase,RequiredCombatRoomsPerFloor,bRequireFloorClearToDescend,MaxFloors
+Default,30,240,7,1.5,900,1400,140,15,250,0.6,2,0.5,0,0.03,0.06,0.10,1.00,4,1,true,3
