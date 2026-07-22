@@ -16,7 +16,7 @@
 		},
 		{
 			"Name": "uegameEditor",
-			"Type": "Editor",
+			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "Default"
 		}
 	],
