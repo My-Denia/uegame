@@ -326,7 +326,7 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonTeleportToRoomCmd(
 	TEXT("Teleport the player to a room center: Dungeon.TeleportToRoom <roomIndex>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonTeleportToRoomCmd));
 
-void DungeonFaceNearestCmd(const TArray<FString>& /*Args*/, UWorld* World)
+void DungeonFaceNearestCmd(const TArray<FString>& Args, UWorld* World)
 {
 	if (!World)
 	{
@@ -339,8 +339,15 @@ void DungeonFaceNearestCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	}
 	ADungeonEnemy* Nearest = nullptr;
 	float NearestDist = TNumericLimits<float>::Max();
+	const bool bFilterType = Args.Num() > 0;
+	const int32 RequestedType = bFilterType ? FMath::Clamp(FCString::Atoi(*Args[0]), 0, 2) : -1;
 	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
 	{
+		if (!IsValid(*It) || !(*It)->IsActiveThreat()
+			|| (bFilterType && (*It)->GetArchetypeTypeId() != RequestedType))
+		{
+			continue;
+		}
 		const float D = FVector::Dist2D((*It)->GetActorLocation(), Player->GetActorLocation());
 		if (D < NearestDist)
 		{
@@ -353,18 +360,23 @@ void DungeonFaceNearestCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] FaceNearest: no enemies"));
 		return;
 	}
-	// The melee sweep is front-offset; forensic runs cannot steer the pawn, so rotate it
-	// (attack uses the PAWN's forward vector).
+	// The melee sweep uses the pawn's forward vector, while the third-person camera uses
+	// controller rotation. Pin both so a deterministic presentation capture sees the target.
 	const FVector Dir = Nearest->GetActorLocation() - Player->GetActorLocation();
 	const FRotator Face(0.0f, Dir.Rotation().Yaw, 0.0f);
 	Player->SetActorRotation(Face);
-	UE_LOG(LogTemp, Display, TEXT("[DungeonEvidence] FaceNearest: yaw=%.0f dist=%.0f room=%d"),
-		Face.Yaw, NearestDist, Nearest->GetRoomIndex());
+	if (APlayerController* PC = World->GetFirstPlayerController())
+	{
+		PC->SetControlRotation(Face);
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[DungeonEvidence] FaceNearest: yaw=%.0f dist=%.0f room=%d type=%s"),
+		Face.Yaw, NearestDist, Nearest->GetRoomIndex(), Nearest->GetArchetypeDisplayName());
 }
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonFaceNearestCmd(
 	TEXT("Dungeon.FaceNearest"),
-	TEXT("Rotate the player pawn to face the nearest enemy (forensic aid for the melee sweep)"),
+	TEXT("Rotate pawn/camera to the nearest active enemy, optionally filtered by typeId 0|1|2"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFaceNearestCmd));
 
 // --- M4 forensic verbs ---
@@ -997,6 +1009,66 @@ void DungeonFinaleInitFailCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	}
 }
 
+void DungeonBehaviorProbeCmd(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || Args.Num() != 2)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[DungeonEvidence] usage: Dungeon.BehaviorProbe <typeId 0|1|2> <mode 0..8>"));
+		return;
+	}
+	const int32 TypeId = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 2);
+	const int32 Mode = FMath::Clamp(FCString::Atoi(*Args[1]), 0, 8);
+	APawn* Player = World->GetFirstPlayerController()
+		? World->GetFirstPlayerController()->GetPawn() : nullptr;
+	ADungeonEnemy* Target = nullptr;
+	double BestDistance = TNumericLimits<double>::Max();
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Candidate = *It;
+		if (!IsValid(Candidate) || Candidate->IsActorBeingDestroyed()
+			|| !Candidate->IsActiveThreat() || Candidate->GetArchetypeTypeId() != TypeId)
+		{
+			continue;
+		}
+		const double Distance = Player
+			? FVector::DistSquared2D(Player->GetActorLocation(), Candidate->GetActorLocation())
+			: static_cast<double>(Candidate->GetSpawnOrdinal());
+		if (!Target || Distance < BestDistance
+			|| (Distance == BestDistance && Candidate->GetSpawnOrdinal() < Target->GetSpawnOrdinal()))
+		{
+			Target = Candidate;
+			BestDistance = Distance;
+		}
+	}
+	if (!Target)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[EnemyBehaviorTest] select=false type=%d mode=%d"), TypeId, Mode);
+		return;
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[EnemyBehaviorTest] select=true type=%d mode=%d room=%d ordinal=%d"),
+		TypeId, Mode, Target->GetRoomIndex(), Target->GetSpawnOrdinal());
+	Target->RunBehaviorContractProbeForTests(Mode);
+	if (Mode == 8)
+	{
+		Target->ApplyPlayerDamage(99999, Player);
+	}
+	else if (Mode == 7)
+	{
+		// Reset inside the same console handler. External commands cannot reliably
+		// land inside the 0.05s behavior -> 0.5s damage window.
+		if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
+		{
+			const uint64 Seed = FM->GetRunSeed();
+			UE_LOG(LogTemp, Display,
+				TEXT("[EnemyBehaviorTest] mode=7 restart=true seed=%llu"), Seed);
+			FM->StartRun(Seed);
+		}
+	}
+}
+
 void DungeonContractFailureModeCmd(const TArray<FString>& Args, UWorld* World)
 {
 	ADungeonSpawner* Spawner = FindSpawner(World);
@@ -1043,6 +1115,11 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleInitFailCmd(
 	TEXT("Dungeon.FinaleInitFail"),
 	TEXT("Development-only trigger for the explicit non-restarting finale error state"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleInitFailCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonBehaviorProbeCmd(
+	TEXT("Dungeon.BehaviorProbe"),
+	TEXT("Development-only behavior probe: typeId 0|1|2; mode 0 positive, 1 range, 2 LOS, 3 nav, 4 leash, 5 stale, 6 dead, 7 arm-reset, 8 arm-death"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonBehaviorProbeCmd));
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonContractFailureModeCmd(
 	TEXT("Dungeon.ContractFailureMode"),

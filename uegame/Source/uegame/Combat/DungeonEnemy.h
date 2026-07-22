@@ -1,7 +1,6 @@
-// DungeonEnemy.h - M3's single enemy type.
-// Pursuit: navmesh MoveToActor toward the player on a repath timer (depends on the
-// M2 tileSize=200 navmesh fix). Contact damage on proximity with a per-target damage
-// interval. Death notifies the spawner's room tracking. Placeholder visuals only.
+// DungeonEnemy.h - M3 spawn identity with M8 bounded archetype behavior.
+// Aggro/LOS/leash and 0.5s pursuit/damage quantization remain the outer gates. An additive
+// elapsed-time core owns tells, commits, recovery and Runner circle/dash phases.
 
 #pragma once
 
@@ -15,6 +14,8 @@ class ADungeonSpawner;
 class UHealthComponent;
 class UStaticMeshComponent;
 class UMaterialInstanceDynamic;
+class UTextRenderComponent;
+class AAIController;
 struct FEncounterArchetypeStats;
 
 UCLASS()
@@ -28,14 +29,14 @@ public:
 	/** Apply the DataTable row + room bookkeeping. Call between deferred spawn and FinishSpawning. */
 	void InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, ADungeonSpawner* InSpawner);
 
-	/** M6B: overlay one archetype's stats (stat-only variant - Grunt equals Default by the
-	 *  loader's parity gate, so the Grunt path is behaviourally identical to pre-M6 spawns).
+	/** M6B/M8: overlay one archetype's data-driven stats and select its bounded behavior.
+	 *  Grunt stats equal Default by the loader parity gate; unassigned fallback also uses Grunt
+	 *  behavior without claiming a false M6 identity.
 	 *  InHpMult re-applies the M4 per-floor HP multiplier to the archetype's base HP.
 	 *  InTypeId (m6::TypeId order) is stored as this enemy's authoritative identity; the
 	 *  log/display name is always DERIVED from it via FUegameEncounterConfig::TypeName.
 	 *  Call AFTER InitEnemy and before FinishSpawning. Scales ONLY the visual BodyMesh;
-	 *  the capsule, nav agent, ContactRange, AI state machine, and hit-flash material are
-	 *  untouched by contract. */
+	 *  the capsule, nav agent, ContactRange, and hit-flash material remain unchanged. */
 	void ApplyArchetype(const FEncounterArchetypeStats& Stats, float InHpMult, int32 InTypeId);
 
 	int32 GetRoomIndex() const { return RoomIndex; }
@@ -74,6 +75,12 @@ public:
 	 *  dynamic pawns never do. Returns true when nothing blocks the sightline. */
 	bool ComputeLOSTo(const AActor* Target) const;
 
+#if !UE_BUILD_SHIPPING
+	/** Development-only composite probe for cancellation windows that external commands cannot
+	 *  reach between the 0.05s behavior tick and 0.5s committed-damage tick. */
+	void RunBehaviorContractProbeForTests(int32 Mode);
+#endif
+
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -86,6 +93,14 @@ private:
 	bool ApplyRoomChallengeModifier();
 	bool RollbackRoomChallengeModifier();
 	void PursueTick();
+	/** One-shot same-room wake from a normal acquisition; alert transitions never recurse. */
+	void AlertIdleRoomPeers(APawn* Player);
+	void BehaviorTick();
+	void ResetBehaviorState(bool bDead = false);
+	void ApplyBehaviorPresentation();
+	void ClearBehaviorPulse();
+	void DriveBehaviorMovement(AAIController* AI, APawn* Player);
+	int64 GetBehaviorNowMs() const;
 
 	UFUNCTION()
 	void HandleDeath(AActor* DeadActor);
@@ -101,11 +116,17 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="Combat")
 	TObjectPtr<UStaticMeshComponent> BodyMesh;
 
+	/** Persistent state-driven world label; it mirrors behavior truth and allocates no per-tick UObject. */
+	UPROPERTY(VisibleAnywhere, Category="Combat")
+	TObjectPtr<UTextRenderComponent> BehaviorText;
+
 	/** Dynamic material instance for the hit flash (created in BeginPlay). */
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> BodyMID;
 
 	FTimerHandle PursueTimer;
+	FTimerHandle BehaviorTimer;
+	FTimerHandle BehaviorPulseTimer;
 	FTimerHandle FlashTimer;
 
 	int32 RoomIndex = -1;
@@ -121,6 +142,19 @@ private:
 	/** Contact reach: capsule radii sum + slack; set from capsule sizes at spawn. */
 	float ContactRange = 130.0f;
 	double LastContactDamageTime = -1000.0;
+	float BaseMoveSpeed = 240.0f;
+
+	// Mirrored plain fields for m8enemy::State; engine-independent types stay out of reflection headers.
+	int32 BehaviorPhase = 0;
+	int64 BehaviorPhaseStartedMs = 0;
+	int32 BehaviorCircleDirection = 1;
+	FVector BehaviorDashTarget = FVector::ZeroVector;
+	bool bBehaviorDashTargetValid = false;
+	uint32 BehaviorCommitSerial = 0;
+	bool bPendingCommittedHit = false;
+	float PendingCommittedHitRange = 0.0f;
+	int32 BehaviorDurationNumerator = 1;
+	int32 BehaviorDurationDenominator = 1;
 
 	// --- Run 2.5 perception state (from the DataTable row via InitEnemy) ---
 	/** Idle (false, stands in place) vs Chasing (true). */
@@ -132,5 +166,10 @@ private:
 	bool bNeutralizedForFloorExit = false;
 	bool bRoomChallengeModified = false;
 	float PreChallengeContactDamage = 0.0f;
-	float PreChallengeMoveSpeed = 0.0f;
+	float PreChallengeBaseMoveSpeed = 0.0f;
+	int32 PreChallengeDurationNumerator = 1;
+	int32 PreChallengeDurationDenominator = 1;
+#if !UE_BUILD_SHIPPING
+	int32 BehaviorFaultModeForTests = 0;
+#endif
 };
