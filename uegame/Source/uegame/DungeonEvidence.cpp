@@ -1278,7 +1278,7 @@ void DungeonFinaleStartCmd(const TArray<FString>& Args, UWorld* World)
 	if (!World || Args.Num() < 2 || Args.Num() > 3)
 	{
 		UE_LOG(LogTemp, Error,
-			TEXT("[DungeonEvidence] usage: Dungeon.FinaleStart <seed> <resolve 0..2> [failureMode 0..5]"));
+			TEXT("[DungeonEvidence] usage: Dungeon.FinaleStart <seed> <resolve 0..2> [failureMode 0..6]"));
 		return;
 	}
 	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
@@ -1290,7 +1290,7 @@ void DungeonFinaleStartCmd(const TArray<FString>& Args, UWorld* World)
 	const uint64 Seed = FCString::Strtoui64(*Args[0], nullptr, 10);
 	const int32 Resolve = FMath::Clamp(FCString::Atoi(*Args[1]), 0, 2);
 	const int32 FailureMode = Args.Num() > 2
-		? FMath::Clamp(FCString::Atoi(*Args[2]), 0, 5) : 0;
+		? FMath::Clamp(FCString::Atoi(*Args[2]), 0, 6) : 0;
 	FM->StartFinaleForTests(Seed, Resolve, FailureMode);
 }
 
@@ -1877,7 +1877,7 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleInitFailCmd(
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleStartCmd(
 	TEXT("Dungeon.FinaleStart"),
-	TEXT("Development-only focused final floor: <seed> <resolve 0..2> [failureMode 0..5]"),
+	TEXT("Development-only focused final floor: <seed> <resolve 0..2> [failureMode 0..6]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleStartCmd));
 
 FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleStatusCmd(

@@ -119,11 +119,15 @@ public:
 	void SetSeed64(uint64 InSeed) { Seed64 = InSeed; bHasSeed64 = true; }
 
 	/** In-place floor transition: despawn all enemies, rebuild geometry from NewSeed,
-	 *  re-dirty the navmesh over the whole map, respawn enemies (scaled), teleport the
-	 *  player to the new start room. World and nav system stay alive (no OpenLevel -
-	 *  that path loses the RecastNavMesh, M3 finding). */
-	void RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride = -1,
-	                     float InEnemyHPOverride = -1.0f);
+	 *  re-dirty the navmesh over the whole map, respawn enemies (scaled), optionally
+	 *  commit the final-floor Warden before returning, then teleport the player to the
+	 *  new start room. World and nav system stay alive (no OpenLevel - that path loses
+	 *  the RecastNavMesh, M3 finding). False means the requested finale transaction
+	 *  failed closed; ordinary floors return true after regeneration. */
+	bool RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride = -1,
+	                     float InEnemyHPOverride = -1.0f,
+	                     const FCombatConfigRow* FinaleConfig = nullptr,
+	                     int32 ResolveTokens = 0);
 
 	/** Absolute world position of the start room center (valid after Build). */
 	FVector GetStartWorldLocation() const { return StartWorld; }
@@ -158,10 +162,11 @@ public:
 	}
 	/** 0=none, 1=stale preflight, 2=partial apply followed by required rollback. */
 	void SetChallengeContractFailureModeForTests(int32 Mode) { ChallengeContractFailureModeForTests = Mode; }
-	/** One-shot finale init seam: 1=missing, 2=duplicate, 3=mismatch, 4=partial rollback, 5=invalid profile. */
+	/** One-shot finale init seam: 1=missing, 2=duplicate, 3=mismatch,
+	 *  4=partial rollback, 5=invalid profile, 6=destroyed/stale candidate. */
 	void SetFinaleInitFailureModeForTests(int32 Mode)
 	{
-		FinaleInitFailureModeForTests = FMath::Clamp(Mode, 0, 5);
+		FinaleInitFailureModeForTests = FMath::Clamp(Mode, 0, 6);
 	}
 	/** Evidence-only cache staging for isolated callback validation; caller must restore it. */
 	bool SetRoomAliveCountForTests(int32 RoomIndex, int32 Alive)

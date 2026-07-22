@@ -374,6 +374,15 @@ bool ADungeonSpawner::InitializeFinale(const FCombatConfigRow& Row, int32 Resolv
 	Candidates.reserve(static_cast<size_t>(SpawnedEnemyActors.Num()));
 	CandidateActors.Reserve(SpawnedEnemyActors.Num());
 	TSet<const ADungeonEnemy*> UniqueActors;
+	if (FailureMode == 6 && !SpawnedEnemyActors.IsEmpty())
+	{
+		// Destroyed actors remain in the weak candidate snapshot until cleanup. The production
+		// preflight must reject that stale identity rather than silently selecting another spawn.
+		if (ADungeonEnemy* StaleCandidate = SpawnedEnemyActors[0].Get())
+		{
+			StaleCandidate->Destroy();
+		}
+	}
 	bool bRuntimePreflight = LastPlannedEnemyCount > 0
 		&& SpawnedEnemyActors.Num() == LastPlannedEnemyCount
 		&& LastPlannedRooms.Num() == LastPlannedEnemyCount;
@@ -988,13 +997,14 @@ void ADungeonSpawner::RefreshNavigation()
 	}
 }
 
-void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride, float InEnemyHPOverride)
+bool ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride,
+	float InEnemyHPOverride, const FCombatConfigRow* FinaleConfig, int32 ResolveTokens)
 {
 	UWorld* World = GetWorld();
 	if (!World || !World->IsGameWorld())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[Dungeon] RegenerateFloor is game-world only"));
-		return;
+		return false;
 	}
 
 	// Clear additive finale identity before destroying floor-N actors. No weak pointer or guard
@@ -1029,9 +1039,15 @@ void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 	{
 		SpawnEnemies(InEnemiesPerRoomOverride, InEnemyHPOverride);
 	}
-	SpawnStairs();           // M4: fresh descend trigger in the new farthest room
+	const bool bFinaleCommitted = !FinaleConfig || InitializeFinale(*FinaleConfig, ResolveTokens);
+	if (bFinaleCommitted)
+	{
+		SpawnStairs();         // M4: publish the fresh descend trigger only after the floor transaction commits
+	}
 
 	UE_LOG(LogTemp, Display,
-		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d (in-place, world+navsystem kept alive)"),
-		static_cast<unsigned long long>(NewSeed), Despawned);
+		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d finaleRequested=%s finaleCommitted=%s (in-place, world+navsystem kept alive)"),
+		static_cast<unsigned long long>(NewSeed), Despawned,
+		FinaleConfig ? TEXT("true") : TEXT("false"), bFinaleCommitted ? TEXT("true") : TEXT("false"));
+	return bFinaleCommitted;
 }

@@ -171,6 +171,48 @@ namespace
 			{ PlayerForward.X, PlayerForward.Y })));
 	}
 
+	bool TryMeasureReachablePath(UWorld* World, const APawn* Pawn, const FVector& Target, double& OutLength)
+	{
+		OutLength = 0.0;
+		if (!World || !Pawn)
+		{
+			return false;
+		}
+		const FNavAgentProperties& AgentProps = Pawn->GetNavAgentPropertiesRef();
+		UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+		const ANavigationData* NavData = NavSystem
+			? NavSystem->GetNavDataForProps(AgentProps, Pawn->GetActorLocation()) : nullptr;
+		if (!NavSystem || !NavData)
+		{
+			return false;
+		}
+		const float Radius = FMath::Max(AgentProps.AgentRadius, 35.0f);
+		const float Height = FMath::Max(AgentProps.AgentHeight, 88.0f);
+		const FVector ProjectionExtent(FMath::Max(Radius * 2.0f, 100.0f),
+			FMath::Max(Radius * 2.0f, 100.0f), FMath::Max(Height, 200.0f));
+		FNavLocation Start;
+		FNavLocation End;
+		if (!NavSystem->ProjectPointToNavigation(Pawn->GetActorLocation(), Start, ProjectionExtent, NavData)
+			|| !NavSystem->ProjectPointToNavigation(Target, End, ProjectionExtent, NavData))
+		{
+			return false;
+		}
+		FPathFindingQuery Query(Pawn, *NavData, Start.Location, End.Location);
+		Query.SetAllowPartialPaths(false);
+		const FPathFindingResult Result = NavSystem->FindPathSync(Query);
+		if (!Result.IsSuccessful() || !Result.Path.IsValid() || Result.IsPartial()
+			|| Result.Path->GetPathPoints().Num() < 2)
+		{
+			return false;
+		}
+		const TArray<FNavPathPoint>& Points = Result.Path->GetPathPoints();
+		for (int32 Index = 1; Index < Points.Num(); ++Index)
+		{
+			OutLength += FVector::Dist2D(Points[Index - 1].Location, Points[Index].Location);
+		}
+		return FMath::IsFinite(OutLength);
+	}
+
 	struct FObjectiveSelection
 	{
 		FHudLine Line;
@@ -247,6 +289,18 @@ namespace
 
 		const bool bPrioritizeOrdinary = Spawner->HasFinaleInitialized()
 			&& Spawner->GetLivingOrdinaryEnemyCount() > 0;
+		if (Spawner->HasFinaleInitialized() && !bPrioritizeOrdinary)
+		{
+			ADungeonEnemy* Warden = Spawner->GetWarden();
+			if (IsValid(Warden) && !Warden->IsActorBeingDestroyed() && Warden->IsActiveThreat()
+				&& Warden->GetOwningSpawner() == Spawner)
+			{
+				const float Metres = FVector::Dist2D(
+					Pawn->GetActorLocation(), Warden->GetActorLocation()) / 100.0f;
+				return MakeObjective(FString::Printf(TEXT("OBJECTIVE: WARDEN %.1fm"), Metres),
+					Warden, Warden->GetActorLocation(), FM, Spawner);
+			}
+		}
 		TSet<int32> OrdinaryRooms;
 		if (bPrioritizeOrdinary)
 		{
@@ -261,31 +315,70 @@ namespace
 			}
 		}
 
-		// A chosen contract room is the first tactical commitment while it still has threats.
-		int32 ObjectiveRoom = FM->GetSelectedContractRoom();
-		if (ObjectiveRoom < 0 || Spawner->GetAliveInRoom(ObjectiveRoom) <= 0
-			|| (bPrioritizeOrdinary && !OrdinaryRooms.Contains(ObjectiveRoom)))
+		int32 ObjectiveRoom = INDEX_NONE;
+		if (bPrioritizeOrdinary)
 		{
-			ObjectiveRoom = INDEX_NONE;
-			int32 BestRisk = TNumericLimits<int32>::Max();
-			float BestDistance = TNumericLimits<float>::Max();
-			const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
-			for (int32 Room = 0; Room < Spawner->GetRoomCount(); ++Room)
+			// Keep a live ordinary target stable once acquired. On acquisition, ignore room-risk
+			// labels and choose the shortest complete capsule-agent path; unreachable rooms are
+			// excluded instead of being selected and producing a wall-facing blocked arrow.
+			ADungeonEnemy* LockedOrdinary = Cast<ADungeonEnemy>(LockedTarget);
+			if (LockedOrdinary && IsValid(LockedOrdinary) && !LockedOrdinary->IsActorBeingDestroyed()
+				&& LockedOrdinary->IsActiveThreat() && !LockedOrdinary->IsWarden()
+				&& LockedOrdinary->GetOwningSpawner() == Spawner
+				&& LockedRunSeed == FM->GetRunSeed() && LockedFloorIndex == FM->GetFloorIndex()
+				&& LockedSpawnerKey == Spawner->GetUniqueID()
+				&& OrdinaryRooms.Contains(LockedOrdinary->GetRoomIndex()))
 			{
-				if (Spawner->GetAliveInRoom(Room) <= 0 || !Roles.IsValidIndex(Room)
-					|| (bPrioritizeOrdinary && !OrdinaryRooms.Contains(Room)))
+				ObjectiveRoom = LockedOrdinary->GetRoomIndex();
+			}
+			else
+			{
+				double BestPathLength = TNumericLimits<double>::Max();
+				for (int32 Room : OrdinaryRooms)
 				{
-					continue;
+					double PathLength = 0.0;
+					if (Spawner->GetAliveInRoom(Room) <= 0
+						|| !TryMeasureReachablePath(World, Pawn, Spawner->GetRoomCenterWorld(Room), PathLength))
+					{
+						continue;
+					}
+					if (ObjectiveRoom == INDEX_NONE || PathLength < BestPathLength
+						|| (FMath::IsNearlyEqual(PathLength, BestPathLength) && Room < ObjectiveRoom))
+					{
+						ObjectiveRoom = Room;
+						BestPathLength = PathLength;
+					}
 				}
-				const int32 Risk = m8objective::room_risk_priority(Roles[Room]);
-				const float Distance = FVector::DistSquared2D(Pawn->GetActorLocation(), Spawner->GetRoomCenterWorld(Room));
-				if (ObjectiveRoom == INDEX_NONE || Risk < BestRisk
-					|| (Risk == BestRisk && (Distance < BestDistance
-						|| (FMath::IsNearlyEqual(Distance, BestDistance) && Room < ObjectiveRoom))))
+			}
+		}
+		else
+		{
+			// Before the finale, a chosen contract room remains the first tactical commitment;
+			// otherwise preserve the established room-risk then distance ordering.
+			ObjectiveRoom = FM->GetSelectedContractRoom();
+			if (ObjectiveRoom < 0 || Spawner->GetAliveInRoom(ObjectiveRoom) <= 0)
+			{
+				ObjectiveRoom = INDEX_NONE;
+				int32 BestRisk = TNumericLimits<int32>::Max();
+				float BestDistance = TNumericLimits<float>::Max();
+				const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+				for (int32 Room = 0; Room < Spawner->GetRoomCount(); ++Room)
 				{
-					ObjectiveRoom = Room;
-					BestRisk = Risk;
-					BestDistance = Distance;
+					if (Spawner->GetAliveInRoom(Room) <= 0 || !Roles.IsValidIndex(Room))
+					{
+						continue;
+					}
+					const int32 Risk = m8objective::room_risk_priority(Roles[Room]);
+					const float Distance = FVector::DistSquared2D(
+						Pawn->GetActorLocation(), Spawner->GetRoomCenterWorld(Room));
+					if (ObjectiveRoom == INDEX_NONE || Risk < BestRisk
+						|| (Risk == BestRisk && (Distance < BestDistance
+							|| (FMath::IsNearlyEqual(Distance, BestDistance) && Room < ObjectiveRoom))))
+					{
+						ObjectiveRoom = Room;
+						BestRisk = Risk;
+						BestDistance = Distance;
+					}
 				}
 			}
 		}
@@ -339,7 +432,12 @@ namespace
 			const FString RoomText = bContractRoom
 				? FString::Printf(TEXT("OBJECTIVE: CONTRACT ROOM R%d %.1fm"), ObjectiveRoom, RoomMetres)
 				: FString::Printf(TEXT("OBJECTIVE: ROOM R%d %.1fm"), ObjectiveRoom, RoomMetres);
-			return MakeObjective(RoomText, Spawner, RoomCenter, FM, Spawner, RoomKey);
+			AActor* RoomLockTarget = Spawner;
+			if (bPrioritizeOrdinary && BestEnemy)
+			{
+				RoomLockTarget = BestEnemy;
+			}
+			return MakeObjective(RoomText, RoomLockTarget, RoomCenter, FM, Spawner, RoomKey);
 		}
 
 		return { { TEXT("OBJECTIVE: NO CURRENT TARGET"), kDim } };
@@ -664,14 +762,21 @@ void AUegameHUD::LogObjectiveRouteStatusForTests() const
 	const TCHAR* Status = ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("READY")
 		: ObjectiveRouteStatus == EObjectiveRouteStatus::Blocked ? TEXT("BLOCKED")
 		: ObjectiveRouteStatus == EObjectiveRouteStatus::Updating ? TEXT("UPDATING") : TEXT("NONE");
+	const ADungeonEnemy* TargetEnemy = Cast<ADungeonEnemy>(ObjectiveTargetLock.Get());
+	const ADungeonSpawner* TargetSpawner = TargetEnemy ? TargetEnemy->GetOwningSpawner() : nullptr;
+	const TCHAR* TargetKind = TargetEnemy
+		? (TargetEnemy->IsWarden() ? TEXT("warden") : TEXT("ordinary"))
+		: (ObjectiveTargetLock.IsValid() ? TEXT("other") : TEXT("none"));
 	UE_LOG(LogTemp, Display,
-		TEXT("[ObjectiveRouteStatus] status=%s arrow=%s serial=%llu result=%u targetKey=%u pawnKey=%u runSeed=%llu floor=%d waypoint=(%.1f,%.1f,%.1f) faultMode=%d"),
+		TEXT("[ObjectiveRouteStatus] status=%s arrow=%s serial=%llu result=%u targetKey=%u pawnKey=%u runSeed=%llu floor=%d waypoint=(%.1f,%.1f,%.1f) faultMode=%d targetKind=%s targetRoom=%d ordinaryAlive=%d"),
 		Status, ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("true") : TEXT("false"),
 		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), ObjectiveRouteLastResult,
 		ObjectiveRouteTargetKey, ObjectiveRoutePawnKey,
 		static_cast<unsigned long long>(ObjectiveRouteRunSeed), ObjectiveRouteFloorIndex,
 		ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
-		ObjectiveRouteFaultModeForTests);
+		ObjectiveRouteFaultModeForTests, TargetKind,
+		TargetEnemy ? TargetEnemy->GetRoomIndex() : INDEX_NONE,
+		TargetSpawner ? TargetSpawner->GetLivingOrdinaryEnemyCount() : INDEX_NONE);
 }
 
 bool AUegameHUD::TryGetObjectiveRouteWaypointForTests(FVector& OutWaypoint) const

@@ -335,14 +335,11 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		FloorIndex, Mult, EffPerRoom, EffHP,
 		Cfg.EnemiesPerRoom, Cfg.EnemyMaxHP, Cfg.PerFloorScaling);
 
-	Spawner->RegenerateFloor(FloorSeed, EffPerRoom, EffHP);
-	if (FloorIndex >= Cfg.MaxFloors)
+	const FCombatConfigRow* FinaleConfig = FloorIndex >= Cfg.MaxFloors ? &Cfg : nullptr;
+	if (!Spawner->RegenerateFloor(FloorSeed, EffPerRoom, EffHP, FinaleConfig, ResolveTokens))
 	{
-		if (!Spawner->InitializeFinale(Cfg, ResolveTokens))
-		{
-			NotifyFinaleInitFailed();
-			return;
-		}
+		NotifyFinaleInitFailed();
+		return;
 	}
 	ActualCombatRooms = FMath::Max(0, Spawner->GetActualEnemyRoomCount());
 	RequiredCombatRooms = m8room::required_combat_rooms(
