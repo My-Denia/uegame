@@ -43,6 +43,7 @@ public:
 	ADungeonSpawner* GetOwningSpawner() const { return SpawnerRef.Get(); }
 	/** True only while this actor can still pursue or damage the player. */
 	bool IsActiveThreat() const;
+	bool IsRoomChallengeModified() const { return bRoomChallengeModified; }
 
 	// --- M7A.2 read-only identity/HP surface (consumed by the AUegameHUD enemy readout) ---
 	/** True only after ApplyArchetype ran (M6 assignment). The static-spawner /
@@ -73,6 +74,9 @@ private:
 	friend class ADungeonSpawner;
 	/** Stop damage, movement, collision and visibility synchronously, then queue destroy. */
 	bool NeutralizeForFloorExit(bool& bOutDestroyQueued);
+	bool CanApplyRoomChallengeModifier() const;
+	bool ApplyRoomChallengeModifier();
+	bool RollbackRoomChallengeModifier();
 	void PursueTick();
 
 	UFUNCTION()
@@ -117,4 +121,7 @@ private:
 
 	bool bLoggedFirstMove = false;
 	bool bNeutralizedForFloorExit = false;
+	bool bRoomChallengeModified = false;
+	float PreChallengeContactDamage = 0.0f;
+	float PreChallengeMoveSpeed = 0.0f;
 };

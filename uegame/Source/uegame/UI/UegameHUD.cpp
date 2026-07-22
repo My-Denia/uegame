@@ -256,6 +256,19 @@ void AUegameHUD::DrawHUD()
 		Right.Add({ FString::Printf(TEXT("Floor %d    seed 0x%llx"),
 			FM->GetFloorIndex(), static_cast<unsigned long long>(FM->GetRunSeed())), kBody });
 		Right.Add({ FString::Printf(TEXT("State      %s"), RunStateName(FM->GetRunState())), kBody });
+		if (FM->IsRoomContractPending())
+		{
+			Right.Add({ FString::Printf(TEXT("Contract   CHOOSE  Secure R%d / Challenge R%d"),
+				FM->GetSecureContractRoom(), FM->GetChallengeContractRoom()), kAccent });
+		}
+		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Secure)
+		{
+			Right.Add({ FString::Printf(TEXT("Contract   SECURE R%d"), FM->GetSelectedContractRoom()), kBody });
+		}
+		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Challenge)
+		{
+			Right.Add({ FString::Printf(TEXT("Contract   CHALLENGE R%d"), FM->GetSelectedContractRoom()), kAccent });
+		}
 		Right.Add({ FString::Printf(TEXT("Exit       objective %s  safe %s"),
 			FM->IsFloorObjectiveComplete() ? TEXT("READY") : TEXT("OPEN"),
 			FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO")),
@@ -317,7 +330,22 @@ void AUegameHUD::DrawHUD()
 	TArray<FHudLine> Center;
 	if (FM && FM->IsRunActive())
 	{
-		switch (FM->GetRunState())
+		if (FM->IsRoomContractPending())
+		{
+			Center.Add({ TEXT("ROOM CONTRACT"), kAccent });
+			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  Recover now / [2] CHALLENGE R%d  Greater reward, stronger threats"),
+				FM->GetSecureContractRoom(), FM->GetChallengeContractRoom()), kBody });
+			Center.Add({ TEXT("Choose 1 or 2 to begin this floor"), kDim });
+		}
+		else if (FM->HasRoomContractFallbackWarning())
+		{
+			Center.Add({ TEXT("CHALLENGE UNAVAILABLE - SECURE AUTO-SELECTED"), kAccent });
+		}
+		else if (FM->HasRoomContractUnavailableWarning())
+		{
+			Center.Add({ TEXT("ROOM CONTRACT UNAVAILABLE - CONTINUING SAFELY"), kAccent });
+		}
+		else switch (FM->GetRunState())
 		{
 		case m8authority::RunState::Paused:
 			Center.Add({ TEXT("PAUSED"), kAccent });

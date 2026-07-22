@@ -22,6 +22,9 @@
 
 // Engine-agnostic seed pipeline (repo root include path; .cpp-only include).
 #include "m2_adapter.hpp"
+#include "m8_room_contract.hpp"
+
+#include <vector>
 
 namespace
 {
@@ -30,6 +33,17 @@ namespace
 	// first-run seed is now entropy (ResolveFirstRunSeed). Restarts chain deterministically
 	// via m2::nextRunSeed regardless of how the first seed was picked.
 	constexpr uint64 kDemoRunSeed = 7;
+
+	std::vector<std::int64_t> ToContractIds(const TArray<int64>& Ids)
+	{
+		std::vector<std::int64_t> Out;
+		Out.reserve(static_cast<size_t>(Ids.Num()));
+		for (const int64 Id : Ids)
+		{
+			Out.push_back(static_cast<std::int64_t>(Id));
+		}
+		return Out;
+	}
 }
 
 void UUegameFloorManager::Initialize(FSubsystemCollectionBase& Collection)
@@ -135,6 +149,39 @@ ADungeonSpawner* UUegameFloorManager::FindSpawner() const
 	return nullptr;
 }
 
+ADungeonSpawner* UUegameFloorManager::FindUniqueFreshSpawnerForCurrentFloor() const
+{
+#if !UE_BUILD_SHIPPING
+	if (bForceNoFreshSpawnerForTests)
+	{
+		return nullptr;
+	}
+#endif
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (!World)
+	{
+		return nullptr;
+	}
+	ADungeonSpawner* Match = nullptr;
+	for (TActorIterator<ADungeonSpawner> It(World); It; ++It)
+	{
+		ADungeonSpawner* Candidate = *It;
+		if (!IsValid(Candidate) || Candidate->IsActorBeingDestroyed()
+			|| Candidate->GetWorld() != World || !Candidate->HasEncounterAssignment()
+			|| Candidate->GetEncounterRunSeed() != RunSeed
+			|| Candidate->GetEncounterFloorIndex() != FloorIndex)
+		{
+			continue;
+		}
+		if (Match)
+		{
+			return nullptr;
+		}
+		Match = Candidate;
+	}
+	return Match;
+}
+
 void UUegameFloorManager::HealPlayerFull() const
 {
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
@@ -180,8 +227,9 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 
 	RunSeed = InRunSeed;
 	bRunActive = true;
+	ClearRoomContractState();
 	RuntimeLifecycle.state = m8authority::RunState::Playing;
-	ApplyWorldPause(false);
+	RefreshWorldPause();
 	PendingTransition = EPendingTransition::None;   // a manual (re)start cancels queued intent
 	UE_LOG(LogTemp, Display, TEXT("[RunStarted] runSeed=%llu maxFloors=%d"),
 		static_cast<unsigned long long>(RunSeed), FUegameCombatConfig::Get().MaxFloors);
@@ -216,6 +264,7 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		Cfg.EnemiesPerRoom, Cfg.EnemyMaxHP, Cfg.PerFloorScaling);
 
 	Spawner->RegenerateFloor(FloorSeed, EffPerRoom, EffHP);
+	InitializeRoomContract(Spawner);
 
 	// Evidence (acceptance E): HP persistence is visible here - the pawn survives the
 	// in-place transition, so playerHP logged at floor start carries damage from the
@@ -247,6 +296,13 @@ void UUegameFloorManager::RequestDescend(bool bForce)
 	if (PendingTransition != EPendingTransition::None)
 	{
 		return;   // duplicate trigger, or the player already died this tick
+	}
+	// A floor cannot be replaced while its hard-paused room contract is unresolved. This
+	// applies even to Development-only forced descent so test verbs cannot orphan Pending.
+	if (IsRoomContractPending())
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Stairs] descend BLOCKED by room-contract-pending"));
+		return;
 	}
 
 	ADungeonSpawner* Spawner = FindSpawner();
@@ -378,6 +434,26 @@ void UUegameFloorManager::ApplyWorldPause(bool bPaused) const
 	}
 }
 
+void UUegameFloorManager::RefreshWorldPause() const
+{
+	const bool bLifecyclePaused = RuntimeLifecycle.state == m8authority::RunState::Paused
+		|| RuntimeLifecycle.state == m8authority::RunState::Won
+		|| RuntimeLifecycle.state == m8authority::RunState::Failed
+		|| RuntimeLifecycle.state == m8authority::RunState::Error;
+	ApplyWorldPause(IsRoomContractPending() || bLifecyclePaused);
+}
+
+void UUegameFloorManager::ClearRoomContractState()
+{
+	RoomContractChoice = EUegameRoomContractChoice::Unavailable;
+	SecureContractRoom = INDEX_NONE;
+	ChallengeContractRoom = INDEX_NONE;
+	SelectedContractRoom = INDEX_NONE;
+	bChallengeContractDisabled = false;
+	RoomContractWarning = EUegameRoomContractWarning::None;
+	RoomContractCommitCount = 0;
+}
+
 void UUegameFloorManager::EnterTerminalState(m8authority::RunEvent Event, const TCHAR* LogAnchor)
 {
 	const m8authority::LifecycleDecision Decision = m8authority::apply_event(RuntimeLifecycle, Event);
@@ -385,7 +461,8 @@ void UUegameFloorManager::EnterTerminalState(m8authority::RunEvent Event, const 
 	{
 		return;
 	}
-	ApplyWorldPause(true);
+	ClearRoomContractState();
+	RefreshWorldPause();
 	UE_LOG(LogTemp, Display, TEXT("[RunState] source=%s state=%d manualActionRequired=true"),
 		LogAnchor, static_cast<int32>(RuntimeLifecycle.state));
 }
@@ -414,6 +491,12 @@ void UUegameFloorManager::TogglePause()
 	{
 		return;
 	}
+	if (IsRoomContractPending())
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[RunPause] ignored=room-contract-pending choose=1-or-2"));
+		return;
+	}
 	const m8authority::LifecycleDecision Decision =
 		m8authority::apply_event(RuntimeLifecycle, m8authority::RunEvent::TogglePause);
 	if (!Decision.state_changed)
@@ -421,7 +504,7 @@ void UUegameFloorManager::TogglePause()
 		return;
 	}
 	const bool bPaused = RuntimeLifecycle.state == m8authority::RunState::Paused;
-	ApplyWorldPause(bPaused);
+	RefreshWorldPause();
 	UE_LOG(LogTemp, Display, TEXT("[RunPause] paused=%s"), bPaused ? TEXT("true") : TEXT("false"));
 }
 
@@ -438,7 +521,8 @@ void UUegameFloorManager::RequestManualRestart()
 		return;
 	}
 	PendingTransition = EPendingTransition::None;
-	ApplyWorldPause(false);
+	ClearRoomContractState();
+	RefreshWorldPause();
 	RestartRun(TEXT("manual"));
 }
 
@@ -487,6 +571,222 @@ void UUegameFloorManager::RepokeStairsForDescend() const
 	{
 		It->OnFloorCleared();
 	}
+}
+
+void UUegameFloorManager::InitializeRoomContract(ADungeonSpawner* Spawner)
+{
+	ClearRoomContractState();
+	RefreshWorldPause();
+
+	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
+	ADungeonSpawner* FreshSpawner = FindUniqueFreshSpawnerForCurrentFloor();
+	if (!Spawner || FreshSpawner != Spawner || FloorIndex >= Cfg.MaxFloors)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[RoomContract] floor=%d state=Unavailable reason=%s paused=false"),
+			FloorIndex, FloorIndex >= Cfg.MaxFloors ? TEXT("final-floor") : TEXT("no-unique-fresh-spawner"));
+		return;
+	}
+
+	std::vector<m8contract::RoomCandidate> Candidates;
+	Candidates.reserve(static_cast<size_t>(Spawner->GetRoomCount()));
+	const FVector Start = Spawner->GetRoomCenterWorld(Spawner->GetStartRoomIndex());
+	const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+	for (int32 RoomIndex = 0; RoomIndex < Spawner->GetRoomCount(); ++RoomIndex)
+	{
+		if (!Roles.IsValidIndex(RoomIndex))
+		{
+			continue;
+		}
+		Candidates.push_back({
+			RoomIndex,
+			static_cast<m8contract::Role>(Roles[RoomIndex]),
+			static_cast<double>(FVector::DistSquared2D(Start, Spawner->GetRoomCenterWorld(RoomIndex))),
+			Spawner->GetInitialInRoom(RoomIndex),
+			RoomIndex == Spawner->GetStartRoomIndex()
+		});
+	}
+	const m8contract::Selection Selection = m8contract::select_rooms(Candidates);
+	if (!Selection.available)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RoomContract] floor=%d state=Unavailable reason=zero-candidates paused=false"), FloorIndex);
+		return;
+	}
+
+	SecureContractRoom = Selection.secure_room;
+	ChallengeContractRoom = Selection.challenge_room;
+	RoomContractChoice = EUegameRoomContractChoice::Pending;
+	RefreshWorldPause();
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomContract] floor=%d state=Pending secureRoom=%d challengeRoom=%d paused=true"),
+		FloorIndex, SecureContractRoom, ChallengeContractRoom);
+}
+
+void UUegameFloorManager::ApplyContractHeal(float Fraction, const TCHAR* Reason, int32 RoomIndex) const
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!HP || HP->IsDead())
+	{
+		return;
+	}
+	const float Before = HP->GetHP();
+	const float Applied = HP->Heal(HP->GetMaxHP() * Fraction);
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomContractHeal] floor=%d room=%d reason=%s before=%.1f applied=%.1f after=%.1f"),
+		FloorIndex, RoomIndex, Reason, Before, Applied, HP->GetHP());
+}
+
+void UUegameFloorManager::ResolveRoomContractUnavailable(const TCHAR* Reason)
+{
+	RoomContractChoice = EUegameRoomContractChoice::Unavailable;
+	SelectedContractRoom = INDEX_NONE;
+	RoomContractWarning = EUegameRoomContractWarning::Unavailable;
+	RefreshWorldPause();
+	UE_LOG(LogTemp, Error,
+		TEXT("[RoomContract] floor=%d state=Unavailable reason=%s paused=false pending=false commitCount=%d"),
+		FloorIndex, Reason, RoomContractCommitCount);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Red,
+			TEXT("ROOM CONTRACT UNAVAILABLE - continuing without a contract."));
+	}
+}
+
+bool UUegameFloorManager::CommitSecureContract(
+	ADungeonSpawner* Spawner, bool bFallback, const TCHAR* FailureReason)
+{
+	if (!IsRoomContractPending() || RoomContractCommitCount != 0 || !Spawner)
+	{
+		return false;
+	}
+	const m8contract::TransactionTransition Policy =
+		m8contract::choose_secure(m8contract::begin_transaction(true));
+	if (Policy.action != m8contract::TransactionAction::CommitSecure
+		|| Policy.state.commit_count != 1 || Policy.state.world_paused)
+	{
+		ResolveRoomContractUnavailable(TEXT("secure-policy-rejected"));
+		return false;
+	}
+	int32 Room = SecureContractRoom;
+	if (Room < 0 || Spawner->GetAliveInRoom(Room) <= 0)
+	{
+		Room = ChallengeContractRoom;
+	}
+	if (Room < 0 || Spawner->GetAliveInRoom(Room) <= 0)
+	{
+		Room = INDEX_NONE;
+		for (int32 Candidate = 0; Candidate < Spawner->GetRoomCount(); ++Candidate)
+		{
+			if (Spawner->GetAliveInRoom(Candidate) > 0)
+			{
+				Room = Candidate;
+				break;
+			}
+		}
+	}
+	if (Room < 0)
+	{
+		ResolveRoomContractUnavailable(TEXT("secure-fallback-has-no-live-room"));
+		return false;
+	}
+
+	SelectedContractRoom = Room;
+	RoomContractChoice = EUegameRoomContractChoice::Secure;
+	bChallengeContractDisabled = bFallback;
+	RoomContractWarning = bFallback
+		? EUegameRoomContractWarning::SecureFallback
+		: EUegameRoomContractWarning::None;
+	++RoomContractCommitCount;
+	ApplyContractHeal(0.25f, bFallback ? TEXT("challenge-fallback") : TEXT("secure-commit"), Room);
+	RefreshWorldPause();
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomContract] floor=%d state=Secure selectedRoom=%d fallback=%s failure=%s paused=false pending=false commitCount=%d"),
+		FloorIndex, Room, bFallback ? TEXT("true") : TEXT("false"), FailureReason,
+		RoomContractCommitCount);
+	if (bFallback && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Yellow,
+			TEXT("CHALLENGE UNAVAILABLE - SECURE selected automatically."));
+	}
+	return true;
+}
+
+bool UUegameFloorManager::TryCommitRoomContract(int32 Index)
+{
+	if (!IsRoomContractPending() || (Index != 0 && Index != 1))
+	{
+		return false;
+	}
+	ADungeonSpawner* Spawner = FindUniqueFreshSpawnerForCurrentFloor();
+	if (Index == 0)
+	{
+		if (!Spawner)
+		{
+			ResolveRoomContractUnavailable(TEXT("secure-no-unique-fresh-spawner"));
+			return false;
+		}
+		return CommitSecureContract(Spawner, false, TEXT("none"));
+	}
+
+	bChallengeContractDisabled = false;
+	if (!Spawner)
+	{
+		bChallengeContractDisabled = true;
+		ResolveRoomContractUnavailable(TEXT("challenge-no-unique-fresh-spawner"));
+		return false;
+	}
+	if (ChallengeContractRoom < 0 || Spawner->GetAliveInRoom(ChallengeContractRoom) <= 0)
+	{
+		bChallengeContractDisabled = true;
+		return CommitSecureContract(Spawner, true, TEXT("stale-challenge-target"));
+	}
+
+	const FChallengeContractTransactionResult Txn =
+		Spawner->ApplyChallengeContractTransactional(ChallengeContractRoom);
+	const m8contract::ContractTransaction Pending = m8contract::begin_transaction(true);
+	const m8contract::TransactionTransition Preflight = m8contract::preflight_challenge(
+		Pending, ToContractIds(Txn.ExpectedIds), ToContractIds(Txn.EligibleIds),
+		Txn.bTargetCurrent);
+	if (Preflight.action == m8contract::TransactionAction::CommitSecure)
+	{
+		bChallengeContractDisabled = true;
+		return CommitSecureContract(Spawner, true, TEXT("challenge-preflight-failed"));
+	}
+	if (Preflight.action != m8contract::TransactionAction::ApplyChallenge)
+	{
+		ResolveRoomContractUnavailable(TEXT("challenge-policy-preflight-error"));
+		return false;
+	}
+
+	const m8contract::TransactionTransition Final = m8contract::finalize_challenge(
+		Preflight.state, ToContractIds(Txn.AppliedIds), ToContractIds(Txn.RolledBackIds));
+	if (Txn.bCommitted && Final.action == m8contract::TransactionAction::CommitChallenge)
+	{
+		SelectedContractRoom = ChallengeContractRoom;
+		RoomContractChoice = EUegameRoomContractChoice::Challenge;
+		++RoomContractCommitCount;
+		RefreshWorldPause();
+		UE_LOG(LogTemp, Display,
+			TEXT("[RoomContract] floor=%d state=Challenge selectedRoom=%d paused=false pending=false commitCount=%d"),
+			FloorIndex, SelectedContractRoom, RoomContractCommitCount);
+		return true;
+	}
+
+	bChallengeContractDisabled = true;
+	if (!Txn.bRollbackComplete || Final.action == m8contract::TransactionAction::SignalError)
+	{
+		ResolveRoomContractUnavailable(TEXT("challenge-rollback-incomplete"));
+		return false;
+	}
+	if (Final.action != m8contract::TransactionAction::CommitSecure)
+	{
+		ResolveRoomContractUnavailable(TEXT("challenge-policy-finalize-error"));
+		return false;
+	}
+	return CommitSecureContract(Spawner, true, TEXT("partial-challenge-apply"));
 }
 
 void UUegameFloorManager::NotifyFloorCleared()
@@ -567,6 +867,26 @@ void UUegameFloorManager::TryChooseLoadout(int32 Index)
 		return;
 	}
 	ULoadoutComponent* LC = FindPlayerLoadout();
+	const m8contract::Dispatch Dispatch = m8contract::dispatch_slot(
+		RuntimeLifecycle.state == m8authority::RunState::Paused,
+		IsRoomContractPending(), LC && LC->IsRewardPending(), Index);
+	if (Dispatch.owner == m8contract::InputOwner::PauseMenu)
+	{
+		return;
+	}
+	if (Dispatch.owner == m8contract::InputOwner::Contract)
+	{
+		if (Dispatch.accepted)
+		{
+			TryCommitRoomContract(Index);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[RoomContract] floor=%d state=Pending input=%d accepted=false"), FloorIndex, Index + 1);
+		}
+		return;
+	}
 	if (!LC)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[Loadout] no loadout component on player; ChooseLoadout ignored"));

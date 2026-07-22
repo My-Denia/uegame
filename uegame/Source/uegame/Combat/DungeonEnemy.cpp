@@ -21,6 +21,8 @@
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 
+#include "m8_room_contract.hpp"
+
 namespace
 {
 	// Enemy body colors for the Run 2.5 hit flash (drive BasicShapeMaterial's "Color" param).
@@ -72,6 +74,9 @@ void ADungeonEnemy::InitEnemy(const FCombatConfigRow& Row, int32 InRoomIndex, AD
 	// M7A.2: explicit reset - identity is "unassigned" until ApplyArchetype runs, so the
 	// static-spawner / encounter-unavailable path can never inherit a stale id.
 	ArchetypeTypeId = INDEX_NONE;
+	bRoomChallengeModified = false;
+	PreChallengeContactDamage = 0.0f;
+	PreChallengeMoveSpeed = 0.0f;
 	ContactDamage = Row.EnemyContactDamage;
 	DamageInterval = Row.EnemyDamageInterval;
 	AggroRange = Row.AggroRange;
@@ -284,6 +289,43 @@ bool ADungeonEnemy::IsActiveThreat() const
 		&& !IsActorBeingDestroyed()
 		&& Health
 		&& !Health->IsDead();
+}
+
+bool ADungeonEnemy::CanApplyRoomChallengeModifier() const
+{
+	return IsActiveThreat() && !bRoomChallengeModified && GetCharacterMovement() != nullptr;
+}
+
+bool ADungeonEnemy::ApplyRoomChallengeModifier()
+{
+	if (!CanApplyRoomChallengeModifier())
+	{
+		return false;
+	}
+	PreChallengeContactDamage = ContactDamage;
+	PreChallengeMoveSpeed = GetCharacterMovement()->MaxWalkSpeed;
+	ContactDamage = static_cast<float>(m8contract::challenge_damage(FMath::RoundToInt(ContactDamage)));
+	GetCharacterMovement()->MaxWalkSpeed = PreChallengeMoveSpeed * 1.20f;
+	bRoomChallengeModified = true;
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomContractEnemy] room=%d type=%s challenge=true damage=%.0f speed=%.1f"),
+		RoomIndex, GetArchetypeDisplayName(), ContactDamage, GetCharacterMovement()->MaxWalkSpeed);
+	return true;
+}
+
+bool ADungeonEnemy::RollbackRoomChallengeModifier()
+{
+	if (!bRoomChallengeModified || !GetCharacterMovement())
+	{
+		return false;
+	}
+	ContactDamage = PreChallengeContactDamage;
+	GetCharacterMovement()->MaxWalkSpeed = PreChallengeMoveSpeed;
+	bRoomChallengeModified = false;
+	UE_LOG(LogTemp, Display,
+		TEXT("[RoomContractEnemy] room=%d type=%s challenge=false rollback=true damage=%.0f speed=%.1f"),
+		RoomIndex, GetArchetypeDisplayName(), ContactDamage, GetCharacterMovement()->MaxWalkSpeed);
+	return true;
 }
 
 bool ADungeonEnemy::NeutralizeForFloorExit(bool& bOutDestroyQueued)

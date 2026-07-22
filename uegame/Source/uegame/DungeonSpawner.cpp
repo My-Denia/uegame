@@ -435,6 +435,109 @@ FFloorExitNeutralizationResult ADungeonSpawner::DeactivateRemainingEnemiesForExi
 	return Result;
 }
 
+FChallengeContractTransactionResult ADungeonSpawner::ApplyChallengeContractTransactional(int32 InRoomIndex)
+{
+	FChallengeContractTransactionResult Result;
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld() || !RoomAliveCounts.IsValidIndex(InRoomIndex))
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[RoomContractTxn] room=%d preflight=false reason=invalid-world-or-room"), InRoomIndex);
+		return Result;
+	}
+
+	Result.Expected = RoomAliveCounts[InRoomIndex];
+	TArray<TWeakObjectPtr<ADungeonEnemy>> Targets;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Enemy = *It;
+		if (!IsValid(Enemy) || Enemy->GetWorld() != World
+			|| Enemy->GetOwningSpawner() != this || Enemy->GetRoomIndex() != InRoomIndex
+			|| !Enemy->IsActiveThreat())
+		{
+			continue;
+		}
+		++Result.ObservedActive;
+		Result.ExpectedIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		if (Enemy->CanApplyRoomChallengeModifier())
+		{
+			++Result.Eligible;
+			Result.EligibleIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+			Targets.Add(Enemy);
+		}
+	}
+
+	int32 FailureMode = 0;
+#if !UE_BUILD_SHIPPING
+	FailureMode = ChallengeContractFailureModeForTests;
+	ChallengeContractFailureModeForTests = 0; // one-shot: never leak a negative seam into a later floor
+#endif
+	const bool bForcedStale = FailureMode == 1;
+	Result.bTargetCurrent = !bForcedStale;
+	Result.bPreflightPassed = !bForcedStale && Result.Expected > 0
+		&& Result.ObservedActive == Result.Expected && Result.Eligible == Result.Expected;
+	if (!Result.bPreflightPassed)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[RoomContractTxn] room=%d preflight=false expected=%d observed=%d eligible=%d forcedStale=%s applied=0 rollback=0"),
+			InRoomIndex, Result.Expected, Result.ObservedActive, Result.Eligible,
+			bForcedStale ? TEXT("true") : TEXT("false"));
+		return Result;
+	}
+
+	TArray<TWeakObjectPtr<ADungeonEnemy>> AppliedTargets;
+	const bool bForcePartial = FailureMode == 2;
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		ADungeonEnemy* Enemy = WeakEnemy.Get();
+		if (!Enemy || !Enemy->ApplyRoomChallengeModifier())
+		{
+			break;
+		}
+		AppliedTargets.Add(Enemy);
+		++Result.Applied;
+		Result.AppliedIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		if (bForcePartial && Result.Applied == 1)
+		{
+			break;
+		}
+	}
+
+	if (!bForcePartial && Result.Applied == Result.Expected)
+	{
+		Result.bCommitted = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("[RoomContractTxn] room=%d preflight=true expected=%d observed=%d eligible=%d applied=%d committed=true"),
+			InRoomIndex, Result.Expected, Result.ObservedActive, Result.Eligible, Result.Applied);
+		return Result;
+	}
+
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : AppliedTargets)
+	{
+		if (ADungeonEnemy* Enemy = WeakEnemy.Get(); Enemy && Enemy->RollbackRoomChallengeModifier())
+		{
+			++Result.RolledBack;
+			Result.RolledBackIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		}
+	}
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		if (const ADungeonEnemy* Enemy = WeakEnemy.Get(); Enemy && Enemy->IsRoomChallengeModified())
+		{
+			++Result.ResidualModified;
+		}
+	}
+	Result.bRollbackComplete = Result.RolledBack == Result.Applied
+		&& Result.ResidualModified == 0;
+	UE_LOG(LogTemp, Error,
+		TEXT("[RoomContractTxn] room=%d preflight=true expected=%d observed=%d eligible=%d applied=%d committed=false rolledBack=%d residualModified=%d rollbackComplete=%s forcedPartial=%s"),
+		InRoomIndex, Result.Expected, Result.ObservedActive, Result.Eligible, Result.Applied,
+		Result.RolledBack, Result.ResidualModified,
+		Result.bRollbackComplete ? TEXT("true") : TEXT("false"),
+		bForcePartial ? TEXT("true") : TEXT("false"));
+	return Result;
+}
+
 void ADungeonSpawner::Build()
 {
 	if (!FloorISM || !WallISM || !CorridorISM || !DoorISM)

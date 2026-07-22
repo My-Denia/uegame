@@ -18,6 +18,21 @@ class ADungeonSpawner;
 class ULoadoutComponent;
 struct FActorsInitializedParams;
 
+enum class EUegameRoomContractChoice : uint8
+{
+	Unavailable = 0,
+	Pending,
+	Secure,
+	Challenge
+};
+
+enum class EUegameRoomContractWarning : uint8
+{
+	None = 0,
+	SecureFallback,
+	Unavailable
+};
+
 UCLASS()
 class UEGAME_API UUegameFloorManager : public UGameInstanceSubsystem
 {
@@ -36,6 +51,18 @@ public:
 	bool IsFloorObjectiveComplete() const { return bFloorObjectiveComplete; }
 	bool AreFloorExitThreatsWithdrawn() const { return bFloorExitThreatsWithdrawn; }
 	bool IsProgressionBlockedByExitSafety() const { return bExitSafetyBlocked; }
+	EUegameRoomContractChoice GetRoomContractChoice() const { return RoomContractChoice; }
+	bool IsRoomContractPending() const { return RoomContractChoice == EUegameRoomContractChoice::Pending; }
+	int32 GetSecureContractRoom() const { return SecureContractRoom; }
+	int32 GetChallengeContractRoom() const { return ChallengeContractRoom; }
+	int32 GetSelectedContractRoom() const { return SelectedContractRoom; }
+	bool IsChallengeContractDisabled() const { return bChallengeContractDisabled; }
+	bool HasRoomContractFallbackWarning() const { return RoomContractWarning == EUegameRoomContractWarning::SecureFallback; }
+	bool HasRoomContractUnavailableWarning() const { return RoomContractWarning == EUegameRoomContractWarning::Unavailable; }
+	int32 GetRoomContractCommitCount() const { return RoomContractCommitCount; }
+#if !UE_BUILD_SHIPPING
+	void SetForceNoFreshSpawnerForTests(bool bForce) { bForceNoFreshSpawnerForTests = bForce; }
+#endif
 
 	/** The single first-run seed authority (contract F, amended: seeded everywhere except this
 	 *  one run-boundary point). Priority: explicit override (Dungeon.SetRunSeed) > bUseFixedFirstSeed
@@ -88,6 +115,7 @@ private:
 	 *  compiled out of Shipping, so gameplay code must be able to enter the loop alone). */
 	void OnWorldActorsInitialized(const FActorsInitializedParams& Params);
 	ADungeonSpawner* FindSpawner() const;
+	ADungeonSpawner* FindUniqueFreshSpawnerForCurrentFloor() const;
 	void HealPlayerFull() const;
 
 	/** M5: the player pawn's loadout component (nullptr if no pawn / no component). */
@@ -97,7 +125,14 @@ private:
 	/** M5: re-attempt descend on every stairs pad after a reward pick (no-op unless the pawn is on a pad). */
 	void RepokeStairsForDescend() const;
 	void ApplyWorldPause(bool bPaused) const;
+	void RefreshWorldPause() const;
+	void ClearRoomContractState();
 	void EnterTerminalState(m8authority::RunEvent Event, const TCHAR* LogAnchor);
+	void InitializeRoomContract(ADungeonSpawner* Spawner);
+	bool TryCommitRoomContract(int32 Index);
+	bool CommitSecureContract(ADungeonSpawner* Spawner, bool bFallback, const TCHAR* FailureReason);
+	void ResolveRoomContractUnavailable(const TCHAR* Reason);
+	void ApplyContractHeal(float Fraction, const TCHAR* Reason, int32 RoomIndex) const;
 
 	FDelegateHandle ActorsInitializedHandle;
 
@@ -109,6 +144,16 @@ private:
 	bool bFloorObjectiveComplete = false;
 	bool bFloorExitThreatsWithdrawn = false;
 	bool bExitSafetyBlocked = false;
+	EUegameRoomContractChoice RoomContractChoice = EUegameRoomContractChoice::Unavailable;
+	int32 SecureContractRoom = INDEX_NONE;
+	int32 ChallengeContractRoom = INDEX_NONE;
+	int32 SelectedContractRoom = INDEX_NONE;
+	bool bChallengeContractDisabled = false;
+	EUegameRoomContractWarning RoomContractWarning = EUegameRoomContractWarning::None;
+	int32 RoomContractCommitCount = 0;
+#if !UE_BUILD_SHIPPING
+	bool bForceNoFreshSpawnerForTests = false;
+#endif
 
 	/** Set by Dungeon.SetRunSeed: overrides entropy for the next first-run seed. */
 	TOptional<uint64> ExplicitFirstSeed;

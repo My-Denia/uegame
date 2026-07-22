@@ -447,7 +447,7 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	const UHealthComponent* HP = Player ? Player->FindComponentByClass<UHealthComponent>() : nullptr;
 
 	FString Rooms;
-	int32 Alive = 0, Total = 0;
+	int32 Alive = 0, Total = 0, ChallengeModified = 0;
 	if (Spawner)
 	{
 		for (int32 i = 0; i < Spawner->GetRoomCount(); ++i)
@@ -457,8 +457,17 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 			Rooms += FString::Printf(TEXT(" r%d=%d/%d"), i, Spawner->GetAliveInRoom(i), Spawner->GetInitialInRoom(i));
 		}
 	}
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		const ADungeonEnemy* Enemy = *It;
+		if (IsValid(Enemy) && Enemy->GetOwningSpawner() == Spawner
+			&& Enemy->IsRoomChallengeModified())
+		{
+			++ChallengeModified;
+		}
+	}
 	UE_LOG(LogTemp, Display,
-		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d objective=%s exitSafe=%s exitBlocked=%s |%s"),
+		TEXT("[FloorStatus] runActive=%s state=%d floor=%d runSeed=%llu spawnerSeed=%llu playerHP=%.0f/%.0f alive=%d/%d objective=%s exitSafe=%s exitBlocked=%s contractChoice=%d contractPending=%s secureRoom=%d challengeRoom=%d selectedRoom=%d challengeDisabled=%s fallbackWarning=%s unavailableWarning=%s contractCommits=%d challengeModified=%d |%s"),
 		(FM && FM->IsRunActive()) ? TEXT("yes") : TEXT("no"),
 		FM ? static_cast<int32>(FM->GetRunState()) : -1,
 		FM ? FM->GetFloorIndex() : -1,
@@ -469,6 +478,16 @@ void DungeonFloorStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
 		(FM && FM->IsFloorObjectiveComplete()) ? TEXT("true") : TEXT("false"),
 		(FM && FM->AreFloorExitThreatsWithdrawn()) ? TEXT("true") : TEXT("false"),
 		(FM && FM->IsProgressionBlockedByExitSafety()) ? TEXT("true") : TEXT("false"),
+		FM ? static_cast<int32>(FM->GetRoomContractChoice()) : -1,
+		(FM && FM->IsRoomContractPending()) ? TEXT("true") : TEXT("false"),
+		FM ? FM->GetSecureContractRoom() : INDEX_NONE,
+		FM ? FM->GetChallengeContractRoom() : INDEX_NONE,
+		FM ? FM->GetSelectedContractRoom() : INDEX_NONE,
+		(FM && FM->IsChallengeContractDisabled()) ? TEXT("true") : TEXT("false"),
+		(FM && FM->HasRoomContractFallbackWarning()) ? TEXT("true") : TEXT("false"),
+		(FM && FM->HasRoomContractUnavailableWarning()) ? TEXT("true") : TEXT("false"),
+		FM ? FM->GetRoomContractCommitCount() : 0,
+		ChallengeModified,
 		*Rooms);
 }
 
@@ -978,6 +997,33 @@ void DungeonFinaleInitFailCmd(const TArray<FString>& /*Args*/, UWorld* World)
 	}
 }
 
+void DungeonContractFailureModeCmd(const TArray<FString>& Args, UWorld* World)
+{
+	ADungeonSpawner* Spawner = FindSpawner(World);
+	if (!Spawner || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ContractFailureMode <0|1|2>"));
+		return;
+	}
+	const int32 Mode = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 2);
+	Spawner->SetChallengeContractFailureModeForTests(Mode);
+	UE_LOG(LogTemp, Display, TEXT("[RoomContractTest] failureMode=%d oneShot=true"), Mode);
+}
+
+void DungeonContractFreshSpawnerFailureCmd(const TArray<FString>& Args, UWorld* World)
+{
+	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
+	if (!FM || Args.Num() != 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.ContractFreshSpawnerFailure <0|1>"));
+		return;
+	}
+	const bool bForce = FCString::Atoi(*Args[0]) != 0;
+	FM->SetForceNoFreshSpawnerForTests(bForce);
+	UE_LOG(LogTemp, Display, TEXT("[RoomContractTest] freshSpawnerFailure=%s"),
+		bForce ? TEXT("true") : TEXT("false"));
+}
+
 FAutoConsoleCommandWithWorldAndArgs GDungeonExitWithdrawalFailureCmd(
 	TEXT("Dungeon.ExitWithdrawalFailure"),
 	TEXT("Development-only negative seam: force floor-exit withdrawal failure (0|1)"),
@@ -997,6 +1043,16 @@ FAutoConsoleCommandWithWorldAndArgs GDungeonFinaleInitFailCmd(
 	TEXT("Dungeon.FinaleInitFail"),
 	TEXT("Development-only trigger for the explicit non-restarting finale error state"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonFinaleInitFailCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonContractFailureModeCmd(
+	TEXT("Dungeon.ContractFailureMode"),
+	TEXT("Development-only one-shot room-contract seam: 0 normal, 1 stale preflight, 2 partial apply/rollback"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonContractFailureModeCmd));
+
+FAutoConsoleCommandWithWorldAndArgs GDungeonContractFreshSpawnerFailureCmd(
+	TEXT("Dungeon.ContractFreshSpawnerFailure"),
+	TEXT("Development-only seam: make room-contract fresh-spawner lookup fail (0|1)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DungeonContractFreshSpawnerFailureCmd));
 
 #endif // !UE_BUILD_SHIPPING
 

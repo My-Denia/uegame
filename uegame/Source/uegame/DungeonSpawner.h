@@ -25,6 +25,24 @@ struct FFloorExitNeutralizationResult
 	bool bSuccess = false;
 };
 
+struct FChallengeContractTransactionResult
+{
+	int32 Expected = 0;
+	int32 ObservedActive = 0;
+	int32 Eligible = 0;
+	int32 Applied = 0;
+	int32 RolledBack = 0;
+	int32 ResidualModified = 0;
+	bool bPreflightPassed = false;
+	bool bCommitted = false;
+	bool bRollbackComplete = true;
+	bool bTargetCurrent = true;
+	TArray<int64> ExpectedIds;
+	TArray<int64> EligibleIds;
+	TArray<int64> AppliedIds;
+	TArray<int64> RolledBackIds;
+};
+
 UCLASS()
 class UEGAME_API ADungeonSpawner : public AActor
 {
@@ -105,9 +123,13 @@ public:
 
 	/** Atomically make every live enemy owned by this spawner harmless before progression. */
 	FFloorExitNeutralizationResult DeactivateRemainingEnemiesForExit(int32 InFloorIndex);
+	/** Preflight the full live room set, then apply all-or-rollback Challenge modifiers. */
+	FChallengeContractTransactionResult ApplyChallengeContractTransactional(int32 InRoomIndex);
 #if !UE_BUILD_SHIPPING
 	/** Negative-test seam. Compiled out of Shipping with the evidence verbs that call it. */
 	void SetForceExitWithdrawalFailureForTests(bool bForce) { bForceExitWithdrawalFailureForTests = bForce; }
+	/** 0=none, 1=stale preflight, 2=partial apply followed by required rollback. */
+	void SetChallengeContractFailureModeForTests(int32 Mode) { ChallengeContractFailureModeForTests = Mode; }
 #endif
 
 	int32 GetRoomCount() const { return RoomCentersWorld.Num(); }
@@ -217,5 +239,6 @@ private:
 	FIntVector CachedTypeTally = FIntVector::ZeroValue;
 #if !UE_BUILD_SHIPPING
 	bool bForceExitWithdrawalFailureForTests = false;
+	int32 ChallengeContractFailureModeForTests = 0;
 #endif
 };
