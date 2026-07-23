@@ -6,6 +6,8 @@
 
 它同时是一次关于"怎么造出来"的实验:M1→M4 全程由 AI coding agent 在证据门禁下实现——预测先于引擎运行被 **预注册**,跨编译器哈希互证,引擎内取证探针,独立审计,跨工具对抗评审。这份 README 同时交代游戏与过程:文中每个数字都能追溯到本仓库的某个提交、PR 线程或文件;凡属人手完成、机器不可达或未经验证之处,原文写明。
 
+> **Portfolio RC update (2026-07-23):** 当前候选已产品化为 **WARDENFALL**：三层完整流程、Executioner/Tempo/Bulwark 构筑、风险收益房间契约、差异化敌人、Warden 最终战、标题/暂停/确认/结果流程、程序化音频和 Windows Shipping 包。当前事实、验证和未完成边界见 [PORTFOLIO.md](PORTFOLIO.md) 与 [Docs/Release/RC-CHECKLIST.md](Docs/Release/RC-CHECKLIST.md)。下文保留旧里程碑叙述作为历史证据，不再代表最新产品表面。
+
 状态:v1 冻结基线完整闭环(M1+M2+M3+M4),PR #3 于 2026-07-02 合并(合并提交 `94e679d`)。此后 `main` 又经 Run 2(PR #7)、Run 2.5(PR #10)、M5 #12B(PR #13,合并提交 `c943c014`)、M6B(PR #16,合并提交 `efcb9d31`)、M7A.1(PR #18,合并提交 `3b857c0`)和 M7A.2(PR #20,合并提交 `4a0027a6`)推进,先后加入敌人感知模型、战斗反馈、"清空才可下楼"、Build 多样性 loadout(非末层清空后三选一、resolved 数值)、Encounter Diversity(房间 role + Grunt/Runner/Brute 三个 stat-only 敌人变体,composition-only)、M7A.1 真实可读性 HUD,以及 M7A.2 truthful per-enemy readability(逐敌人 identity + live HP)接进 gameplay。
 
 本文分两部分:下面的《当前游戏状态(Run 2.x)》反映线上实际玩到的版本;其后的 **§1–§8 是 v1/M4 冻结事实**,原样保留为历史证据,每个数字仍追溯到它最初的提交/PR/日志锚点。
