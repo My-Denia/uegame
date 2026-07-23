@@ -76,6 +76,8 @@ private:
 	uint8 ObjectiveRouteLastResult = 0;
 	uint8 ObjectiveRouteSource = 0; // 0=none, 1=Recast, 2=verified deterministic grid
 	bool bObjectiveRouteDeferQueryOnce = false;
+	uint32 OnboardingPresentationGeneration = MAX_uint32;
+	double OnboardingStartedAtGameSeconds = 0.0;
 #if !UE_BUILD_SHIPPING
 	int32 ObjectiveRouteFaultModeForTests = 0;
 #endif

@@ -179,7 +179,7 @@ inline std::uint64_t path_hash(const std::vector<Cell>& path)
 {
 	std::uint64_t hash = 1469598103934665603ULL;
 	constexpr std::uint64_t prime = 1099511628211ULL;
-	auto mix_int = [&hash](int value)
+	auto mix_int = [&hash, prime](int value)
 	{
 		const std::uint32_t bits = static_cast<std::uint32_t>(value);
 		for (int shift = 0; shift < 32; shift += 8)

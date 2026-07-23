@@ -30,6 +30,7 @@
 #include "../Presentation/PresentationFeedbackComponent.h"
 
 #include "m8_objective_compass.hpp"
+#include "m8_presentation.hpp"
 
 // --- Toggles (default ON: this is readability UI we want visible in normal play + capture) ---
 static TAutoConsoleVariable<int32> CVarShowReadout(
@@ -40,6 +41,11 @@ static TAutoConsoleVariable<int32> CVarShowReadout(
 static TAutoConsoleVariable<float> CVarReadoutScale(
 	TEXT("ui.ShowReadoutScale"), 1.0f,
 	TEXT("M7A.1 readability HUD text scale multiplier (clamped 0.5..4.0; default 1.0)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShowDiagnostics(
+	TEXT("ui.ShowDiagnostics"), 0,
+	TEXT("Optional engineering details in the HUD: 1 = seed/hash/initial roster, 0 = player-facing view."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarShowObjectiveRoute(
@@ -940,6 +946,13 @@ void AUegameHUD::DrawHUD()
 	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
 	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
 	ADungeonSpawner* Spawner = FindSpawner(World);
+	const bool bShowDiagnostics = CVarShowDiagnostics.GetValueOnGameThread() != 0;
+	if (Presentation
+		&& OnboardingPresentationGeneration != Presentation->GetPresentationGeneration())
+	{
+		OnboardingPresentationGeneration = Presentation->GetPresentationGeneration();
+		OnboardingStartedAtGameSeconds = World ? World->GetTimeSeconds() : 0.0;
+	}
 
 	// Shipping-path combat feedback: Canvas primitives are normal HUD rendering, not debug draw.
 	// The component retains only event-derived expiry and never supplies gameplay truth.
@@ -978,108 +991,117 @@ void AUegameHUD::DrawHUD()
 		}
 	}
 
-	// ---------------- Left panel: player / build / reward offer ----------------
+	// ---------------- Left panel: player / build ----------------
 	TArray<FHudLine> Left;
 	Left.Add({ TEXT("PLAYER / BUILD"), kHeader });
 
 	if (HP)
 	{
-		Left.Add({ FString::Printf(TEXT("HP        %.0f / %.0f"), HP->GetHP(), HP->GetMaxHP()), kBody });
+		Left.Add({ FString::Printf(TEXT("HP  %.0f / %.0f"), HP->GetHP(), HP->GetMaxHP()), kBody });
 	}
 	if (LC && LC->HasResolvedStats())
 	{
 		const int32 AtkMs = LC->GetResolvedAttackMs();
 		const float Aps = (AtkMs > 0) ? (1000.0f / static_cast<float>(AtkMs)) : 0.0f;
-		Left.Add({ FString::Printf(TEXT("Damage    %d"), LC->GetResolvedDamage()), kBody });
-		Left.Add({ FString::Printf(TEXT("Attack    %d ms  (%.2f/s)"), AtkMs, Aps), kBody });
+		Left.Add({ FString::Printf(TEXT("Damage %d   Rate %.2f/s"), LC->GetResolvedDamage(), Aps), kBody });
 
 		const TArray<int32>& Picks = LC->GetChosenAffixIds();
 		if (Picks.Num() == 0)
 		{
-			Left.Add({ TEXT("Picks:    none yet"), kDim });
+			Left.Add({ TEXT("Build forming - choose rewards"), kDim });
 		}
 		else
 		{
-			FString P;
 			for (int32 Id : Picks)
 			{
-				P += FString::Printf(TEXT("%d(%s) "), Id, *LC->DescribeAffixById(Id));
-			}
-			Left.Add({ FString::Printf(TEXT("Picks:    %s"), *P.TrimStartAndEnd()), kBody });
-		}
-
-		if (LC->IsRewardPending())
-		{
-			Left.Add({ FString::Printf(TEXT("REWARD PENDING (floor %d) - press 1/2/3"), LC->GetFloorForOffer()), kAccent });
-			const TArray<int32>& Offer = LC->GetCurrentOfferIds();
-			for (int32 i = 0; i < Offer.Num(); ++i)
-			{
-				Left.Add({ FString::Printf(TEXT("   [%d] %s"), i + 1, *LC->DescribeAffixById(Offer[i])), kAccent });
+				Left.Add({ FString::Printf(TEXT("+ %s"), *LC->DescribeAffixById(Id)), kBody });
 			}
 		}
 	}
 	else
 	{
-		Left.Add({ TEXT("(loadout not initialized)"), kDim });
+		Left.Add({ TEXT("Build unavailable"), kDim });
 	}
 	if (Synergy)
 	{
 		const int32 E = Synergy->GetExecutionerRank();
 		const int32 T = Synergy->GetTempoRank();
 		const int32 B = Synergy->GetBulwarkRank();
-		Left.Add({ E > 0
-			? FString::Printf(TEXT("Executioner R%d  finish <=40%% HP"), E)
-			: TEXT("Executioner --"), E > 0 ? kBody : kDim });
-		Left.Add({ T > 0
-			? FString::Printf(TEXT("Tempo       R%d  chain %d/%d"),
-				T, Synergy->GetTempoChain(), Synergy->GetTempoThreshold())
-			: TEXT("Tempo       --"), T > 0 ? kBody : kDim });
-		Left.Add({ B > 0
-			? (Synergy->IsCounterReady()
-				? FString::Printf(TEXT("Bulwark     R%d  COUNTER %.2fs"),
+		if (E > 0)
+		{
+			Left.Add({ FString::Printf(TEXT("EXECUTIONER R%d  Finish <=40%% HP"), E), kBody });
+		}
+		if (T > 0)
+		{
+			Left.Add({ FString::Printf(TEXT("TEMPO R%d  Chain %d/%d"),
+				T, Synergy->GetTempoChain(), Synergy->GetTempoThreshold()),
+				Synergy->GetTempoChain() > 0 ? kAccent : kBody });
+		}
+		if (B > 0)
+		{
+			Left.Add({ Synergy->IsCounterReady()
+				? FString::Printf(TEXT("BULWARK R%d  COUNTER %.1fs"),
 					B, Synergy->GetCounterRemainingSeconds())
-				: FString::Printf(TEXT("Bulwark     R%d  take a hit, then counter"), B))
-			: TEXT("Bulwark     --"),
-			Synergy->IsCounterReady() ? kAccent : (B > 0 ? kBody : kDim) });
+				: FString::Printf(TEXT("BULWARK R%d  Take a hit, then counter"), B),
+				Synergy->IsCounterReady() ? kAccent : kBody });
+		}
 	}
 	if (FM && FM->IsRunActive())
 	{
-		Left.Add({ FString::Printf(TEXT("Resolve     %d / 2  (-30 Warden Guard each)"),
-			FM->GetResolveTokens()), FM->GetResolveTokens() > 0 ? kAccent : kDim });
+		Left.Add({ FString::Printf(TEXT("Resolve %d / 2"), FM->GetResolveTokens()),
+			FM->GetResolveTokens() > 0 ? kAccent : kDim });
 	}
 	DrawPanel(this, Font, 24.0f, 24.0f, Left, Scale);
 
 	// ---------------- Right panel: run / floor / room role / encounter tally ----------------
 	TArray<FHudLine> Right;
-	Right.Add({ TEXT("RUN / ENCOUNTER"), kHeader });
+	Right.Add({ FM && FM->IsRunActive()
+		? FString::Printf(TEXT("RUN / FLOOR %d"), FM->GetFloorIndex())
+		: TEXT("RUN"), kHeader });
 
 	if (FM && FM->IsRunActive())
 	{
-		Right.Add({ FString::Printf(TEXT("Floor %d    seed 0x%llx"),
-			FM->GetFloorIndex(), static_cast<unsigned long long>(FM->GetRunSeed())), kBody });
-		Right.Add({ FString::Printf(TEXT("State      %s"), RunStateName(FM->GetRunState())), kBody });
-		Right.Add({ FString::Printf(TEXT("Resolve    %d / 2"), FM->GetResolveTokens()),
-			FM->GetResolveTokens() > 0 ? kAccent : kDim });
+		if (bShowDiagnostics)
+		{
+			Right.Add({ FString::Printf(TEXT("Seed 0x%llx"),
+				static_cast<unsigned long long>(FM->GetRunSeed())), kDim });
+			Right.Add({ FString::Printf(TEXT("State %s"), RunStateName(FM->GetRunState())), kDim });
+		}
 		if (FM->IsRoomContractPending())
 		{
-			Right.Add({ FString::Printf(TEXT("Contract   CHOOSE  Secure R%d / Challenge R%d"),
-				FM->GetSecureContractRoom(), FM->GetChallengeContractRoom()), kAccent });
+			Right.Add({ TEXT("Contract: choose [1/2]"), kAccent });
 		}
 		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Secure)
 		{
-			Right.Add({ FString::Printf(TEXT("Contract   SECURE R%d  +25%% HP now"), FM->GetSelectedContractRoom()), kBody });
+			Right.Add({ FString::Printf(TEXT("Contract: SECURE R%d"), FM->GetSelectedContractRoom()), kBody });
 		}
 		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Challenge)
 		{
-			Right.Add({ FString::Printf(TEXT("Contract   CHALLENGE R%d  +50%% HP +1 Resolve on clear"), FM->GetSelectedContractRoom()), kAccent });
+			Right.Add({ FString::Printf(TEXT("Contract: CHALLENGE R%d"), FM->GetSelectedContractRoom()), kAccent });
 		}
-		Right.Add({ FString::Printf(TEXT("Rooms      %d / %d required  (%d total)"),
-			FM->GetClearedCombatRooms(), FM->GetRequiredCombatRooms(), FM->GetActualCombatRooms()), kBody });
-		Right.Add({ FString::Printf(TEXT("Exit       objective %s  safe %s  skipped %d"),
-			FM->IsFloorObjectiveComplete() ? TEXT("READY") : TEXT("OPEN"),
-			FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO"),
-			FM->GetAbandonedCombatRooms()),
-			FM->IsProgressionBlockedByExitSafety() ? kAccent : kDim });
+		Right.Add({ FString::Printf(TEXT("Rooms %d / %d cleared"),
+			FM->GetClearedCombatRooms(), FM->GetRequiredCombatRooms()), kBody });
+		const int32 RoomsRemaining = FMath::Max(
+			0, FM->GetRequiredCombatRooms() - FM->GetClearedCombatRooms());
+		if (FM->IsProgressionBlockedByExitSafety())
+		{
+			Right.Add({ TEXT("Exit: BLOCKED - safety check"), kAccent });
+		}
+		else if (FM->IsFloorObjectiveComplete())
+		{
+			Right.Add({ TEXT("Exit: READY"), kAccent });
+		}
+		else
+		{
+			Right.Add({ FString::Printf(TEXT("Exit: clear %d more room%s"),
+				RoomsRemaining, RoomsRemaining == 1 ? TEXT("") : TEXT("s")), kDim });
+		}
+		if (bShowDiagnostics)
+		{
+			Right.Add({ FString::Printf(TEXT("Total rooms %d  skipped %d  safe %s"),
+				FM->GetActualCombatRooms(), FM->GetAbandonedCombatRooms(),
+				FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO")), kDim });
+		}
 	}
 	else
 	{
@@ -1115,25 +1137,28 @@ void AUegameHUD::DrawHUD()
 				Right.Add({ TEXT("Room role: (n/a)"), kDim });
 			}
 
-			const FIntVector T = Spawner->GetCachedTypeTally();
-			Right.Add({ FString::Printf(TEXT("Enemies    Grunt %d  Runner %d  Brute %d"), T.X, T.Y, T.Z), kBody });
-			Right.Add({ FString::Printf(TEXT("typeHash   0x%llx"),
-				static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+			Right.Add({ FString::Printf(TEXT("Threats %d"),
+				Spawner->GetLivingOrdinaryEnemyCount()), kBody });
+			if (bShowDiagnostics)
+			{
+				const FIntVector T = Spawner->GetCachedTypeTally();
+				Right.Add({ FString::Printf(TEXT("Initial G%d R%d B%d"), T.X, T.Y, T.Z), kDim });
+				Right.Add({ FString::Printf(TEXT("typeHash 0x%llx"),
+					static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+			}
 			if (Spawner->HasFinaleInitialized())
 			{
 				if (const ADungeonEnemy* Warden = Spawner->GetWarden())
 				{
 					const bool bGuarded = Warden->GetWardenPhase() == EUegameWardenPhase::Guarded;
-					Right.Add({ FString::Printf(TEXT("WARDEN    %s  %s %d/%d"),
+					Right.Add({ FString::Printf(TEXT("WARDEN %s  %s %d/%d"),
 						WardenPhaseName(Warden->GetWardenPhase()),
 						bGuarded ? TEXT("Guard") : TEXT("HP"),
 						Warden->GetCombatPoolCurrent(), Warden->GetCombatPoolMax()), kAccent });
-					Right.Add({ FString::Printf(TEXT("Finale     ordinary threats %d"),
-						Spawner->GetLivingOrdinaryEnemyCount()), kBody });
 				}
 				else if (Spawner->IsWardenDefeated())
 				{
-					Right.Add({ TEXT("WARDEN    DEFEATED"), kAccent });
+					Right.Add({ TEXT("WARDEN DEFEATED"), kAccent });
 				}
 			}
 		}
@@ -1228,51 +1253,93 @@ void AUegameHUD::DrawHUD()
 	TArray<FHudLine> Center;
 	if (FM && FM->IsRunActive())
 	{
-		if (FM->IsRoomContractPending())
+		const m8authority::RunState RunState = FM->GetRunState();
+		const bool bResultVisible =
+			RunState == m8authority::RunState::Won
+			|| RunState == m8authority::RunState::Failed
+			|| RunState == m8authority::RunState::Error;
+		const int32 PickCount = LC ? LC->GetChosenAffixIds().Num() : 0;
+		const double ElapsedOnboardingSeconds = World
+			? static_cast<double>(World->GetTimeSeconds()) - OnboardingStartedAtGameSeconds
+			: -1.0;
+		const bool bOnboardingVisible = m8presentation::show_onboarding(
+			FM->GetFloorIndex(), PickCount, ElapsedOnboardingSeconds);
+		const m8presentation::Overlay Overlay = m8presentation::choose_overlay(
+			bResultVisible,
+			RunState == m8authority::RunState::Paused,
+			FM->IsRoomContractPending(),
+			LC && LC->IsRewardPending(),
+			bOnboardingVisible);
+
+		switch (Overlay)
 		{
-			Center.Add({ TEXT("ROOM CONTRACT"), kAccent });
-			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  +25%% HP NOW"),
+		case m8presentation::Overlay::Result:
+			if (RunState == m8authority::RunState::Won)
+			{
+				Center.Add({ TEXT("RUN WON"), FLinearColor(0.35f, 1.0f, 0.45f, 1.0f) });
+				Center.Add({ TEXT("R Play Again    Q Quit"), kBody });
+			}
+			else if (RunState == m8authority::RunState::Failed)
+			{
+				Center.Add({ TEXT("RUN FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+			}
+			else
+			{
+				Center.Add({ TEXT("FINAL CHALLENGE ERROR"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+			}
+			break;
+		case m8presentation::Overlay::Pause:
+			Center.Add({ TEXT("PAUSED"), kAccent });
+			Center.Add({ TEXT("Esc Resume    R Restart    Q Quit"), kBody });
+			break;
+		case m8presentation::Overlay::Contract:
+			Center.Add({ TEXT("CHOOSE YOUR ROUTE"), kAccent });
+			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  Recover 25%% HP now"),
 				FM->GetSecureContractRoom()), kBody });
-			Center.Add({ FString::Printf(TEXT("[2] CHALLENGE R%d  Stronger threats, +50%% HP +1 RESOLVE AFTER CLEAR"),
+			Center.Add({ FString::Printf(TEXT("[2] CHALLENGE R%d  Stronger enemies"),
 				FM->GetChallengeContractRoom()), kAccent });
-			Center.Add({ TEXT("Choose 1 or 2 to begin this floor"), kDim });
+			Center.Add({ TEXT("Clear challenge: recover 50% HP + gain 1 Resolve"), kDim });
+			break;
+		case m8presentation::Overlay::Reward:
+			if (LC && LC->GetCurrentOfferIds().Num() == 3)
+			{
+				Center.Add({ TEXT("CHOOSE AN UPGRADE"), kAccent });
+				const TArray<int32>& Offer = LC->GetCurrentOfferIds();
+				for (int32 Index = 0; Index < Offer.Num(); ++Index)
+				{
+					Center.Add({ FString::Printf(TEXT("[%d] %s"),
+						Index + 1, *LC->DescribeAffixById(Offer[Index])), kBody });
+				}
+			}
+			else
+			{
+				Center.Add({ TEXT("REWARD DATA UNAVAILABLE"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+			}
+			break;
+		case m8presentation::Overlay::Onboarding:
+			Center.Add({ TEXT("WASD Move   Mouse Look   F Attack"), kBody });
+			Center.Add({ TEXT("Esc Pause   Q Quit"), kDim });
+			break;
+		case m8presentation::Overlay::None:
+		default:
+			break;
 		}
-		else if (FM->IsProgressionBlockedByExitSafety())
+
+		if (Center.Num() == 0 && FM->IsProgressionBlockedByExitSafety())
 		{
 			Center.Add({ TEXT("EXIT BLOCKED - SAFETY CHECK FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
 			Center.Add({ TEXT("Try the stairs again"), kBody });
 		}
-		else if (FM->HasRoomContractFallbackWarning())
+		else if (Center.Num() == 0 && FM->HasRoomContractFallbackWarning())
 		{
 			Center.Add({ TEXT("CHALLENGE UNAVAILABLE - SECURE AUTO-SELECTED"), kAccent });
 		}
-		else if (FM->HasRoomContractUnavailableWarning())
+		else if (Center.Num() == 0 && FM->HasRoomContractUnavailableWarning())
 		{
 			Center.Add({ TEXT("ROOM CONTRACT UNAVAILABLE - CONTINUING SAFELY"), kAccent });
-		}
-		else switch (FM->GetRunState())
-		{
-		case m8authority::RunState::Paused:
-			Center.Add({ TEXT("PAUSED"), kAccent });
-			Center.Add({ TEXT("Esc Resume    R Restart    Q Quit"), kBody });
-			break;
-		case m8authority::RunState::Won:
-			Center.Add({ TEXT("RUN WON"), FLinearColor(0.35f, 1.0f, 0.45f, 1.0f) });
-			Center.Add({ TEXT("R Play Again    Q Quit"), kBody });
-			break;
-		case m8authority::RunState::Failed:
-			Center.Add({ TEXT("RUN FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
-			Center.Add({ TEXT("R Restart    Q Quit"), kBody });
-			break;
-		case m8authority::RunState::Error:
-			Center.Add({ TEXT("FINAL CHALLENGE ERROR"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
-			Center.Add({ TEXT("R Restart    Q Quit"), kBody });
-			break;
-		case m8authority::RunState::Playing:
-			Center.Add({ TEXT("WASD Move  Mouse Look  F Attack  Esc Pause  Q Quit"), kDim });
-			break;
-		default:
-			break;
 		}
 	}
 	if (Center.Num() > 0)

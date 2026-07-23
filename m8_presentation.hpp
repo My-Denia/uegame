@@ -21,6 +21,16 @@ enum class Cue : std::uint8_t
 	Count
 };
 
+enum class Overlay : std::uint8_t
+{
+	None = 0,
+	Result,
+	Pause,
+	Contract,
+	Reward,
+	Onboarding
+};
+
 struct CueSpec
 {
 	int duration_ms = 100;
@@ -40,4 +50,15 @@ struct PcmBuffer
 CueSpec cue_spec(Cue cue);
 const char* cue_name(Cue cue);
 PcmBuffer generate_pcm(Cue cue, int sample_rate = 22050);
+Overlay choose_overlay(
+	bool result_visible,
+	bool paused,
+	bool contract_pending,
+	bool reward_pending,
+	bool onboarding_visible);
+bool show_onboarding(
+	int floor_index,
+	int chosen_pick_count,
+	double elapsed_game_seconds,
+	double duration_seconds = 15.0);
 } // namespace m8presentation

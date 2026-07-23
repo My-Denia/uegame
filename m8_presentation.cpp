@@ -67,6 +67,45 @@ const char* cue_name(Cue cue)
 	}
 }
 
+Overlay choose_overlay(
+	bool result_visible,
+	bool paused,
+	bool contract_pending,
+	bool reward_pending,
+	bool onboarding_visible)
+{
+	if (result_visible)
+	{
+		return Overlay::Result;
+	}
+	if (paused)
+	{
+		return Overlay::Pause;
+	}
+	if (contract_pending)
+	{
+		return Overlay::Contract;
+	}
+	if (reward_pending)
+	{
+		return Overlay::Reward;
+	}
+	return onboarding_visible ? Overlay::Onboarding : Overlay::None;
+}
+
+bool show_onboarding(
+	int floor_index,
+	int chosen_pick_count,
+	double elapsed_game_seconds,
+	double duration_seconds)
+{
+	return floor_index == 1
+		&& chosen_pick_count == 0
+		&& elapsed_game_seconds >= 0.0
+		&& duration_seconds > 0.0
+		&& elapsed_game_seconds < duration_seconds;
+}
+
 PcmBuffer generate_pcm(Cue cue, int sample_rate)
 {
 	PcmBuffer out;

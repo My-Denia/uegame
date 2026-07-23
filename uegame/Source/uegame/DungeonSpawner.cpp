@@ -8,6 +8,7 @@
 #include "DungeonSpawner.h"
 
 #include "AI/Navigation/NavigationDirtyArea.h"
+#include "Camera/PlayerCameraManager.h"
 #include "CollisionQueryParams.h"
 #include "CollisionShape.h"
 #include "Combat/CombatConfig.h"
@@ -22,6 +23,8 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationSystem.h"
@@ -34,6 +37,33 @@
 #include "m2_adapter.hpp"
 #include "m8_finale.hpp"
 #include "m8_grid_route.hpp"
+
+namespace
+{
+void RefreshPlayerCameraAfterFloorTeleport(APawn* Pawn)
+{
+	if (!Pawn)
+	{
+		return;
+	}
+
+	// A room contract hard-pauses the world in the same frame as floor regeneration.
+	// Refresh the camera explicitly so it cannot retain the prior floor's view while
+	// paused (which can leave a restart contract screen looking completely black).
+	Pawn->UpdateComponentTransforms();
+	if (USpringArmComponent* CameraBoom = Pawn->FindComponentByClass<USpringArmComponent>())
+	{
+		CameraBoom->TickComponent(0.0f, LEVELTICK_All, nullptr);
+	}
+	if (APlayerController* PC = Cast<APlayerController>(Pawn->GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->UpdateCamera(0.0f);
+		}
+	}
+}
+}
 
 ADungeonSpawner::ADungeonSpawner()
 {
@@ -1241,7 +1271,10 @@ bool ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 	{
 		if (APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0))
 		{
-			Pawn->SetActorLocation(StartWorld + FVector(0.0f, 0.0f, 100.0f));
+			Pawn->SetActorLocation(
+				StartWorld + FVector(0.0f, 0.0f, 100.0f),
+				false, nullptr, ETeleportType::TeleportPhysics);
+			RefreshPlayerCameraAfterFloorTeleport(Pawn);
 			UE_LOG(LogTemp, Display, TEXT("[Placement] player at start (RegenerateFloor) seed=%llu"),
 				static_cast<unsigned long long>(NewSeed));
 		}
