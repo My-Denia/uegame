@@ -16,6 +16,8 @@ enum class Cue : std::uint8_t
 	RewardOffered,
 	RewardChosen,
 	BuildProc,
+	FloorStart,
+	WardenBreak,
 	Victory,
 	Defeat,
 	Count

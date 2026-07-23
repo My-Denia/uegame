@@ -11,9 +11,10 @@
 int main()
 {
 	using m8presentation::Cue;
-	constexpr std::array<Cue, 9> cues = {
+	constexpr std::array<Cue, 11> cues = {
 		Cue::AttackMiss, Cue::Hit, Cue::PlayerDamage, Cue::EnemyDeath,
 		Cue::RewardOffered, Cue::RewardChosen, Cue::BuildProc,
+		Cue::FloorStart, Cue::WardenBreak,
 		Cue::Victory, Cue::Defeat
 	};
 
@@ -52,7 +53,7 @@ int main()
 	assert(!m8presentation::show_onboarding(1, 1, 1.0));
 	assert(!m8presentation::show_onboarding(1, 0, -0.1));
 
-	std::cout << "m8_presentation: PASS cues=9 rewardDistinct=true sampleRate=22050"
+	std::cout << "m8_presentation: PASS cues=11 rewardDistinct=true sampleRate=22050"
 		" overlayPriority=true onboardingBoundary=true\n";
 	return 0;
 }

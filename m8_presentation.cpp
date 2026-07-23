@@ -42,6 +42,8 @@ CueSpec cue_spec(Cue cue)
 	case Cue::RewardOffered: return { 260, 440, 660, 2, 9000 };
 	case Cue::RewardChosen:  return { 360, 660, 1040, 3, 10000 };
 	case Cue::BuildProc:     return { 280, 880, 1320, 3, 10500 };
+	case Cue::FloorStart:    return { 420, 260, 620, 2, 8500 };
+	case Cue::WardenBreak:   return { 520, 110, 920, 3, 13000 };
 	case Cue::Victory:       return { 720, 523, 1046, 4, 11000 };
 	case Cue::Defeat:        return { 650, 220, 55, 3, 11500 };
 	case Cue::Count:
@@ -60,6 +62,8 @@ const char* cue_name(Cue cue)
 	case Cue::RewardOffered: return "reward-offered";
 	case Cue::RewardChosen: return "reward-chosen";
 	case Cue::BuildProc: return "build-proc";
+	case Cue::FloorStart: return "floor-start";
+	case Cue::WardenBreak: return "warden-break";
 	case Cue::Victory: return "victory";
 	case Cue::Defeat: return "defeat";
 	case Cue::Count:

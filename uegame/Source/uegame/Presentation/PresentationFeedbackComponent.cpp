@@ -207,6 +207,20 @@ void UPresentationFeedbackComponent::EmitBuildProc(const FString& ProcText)
 	EmitCue(static_cast<uint8>(m8presentation::Cue::BuildProc), ProcText, 65, 0.65);
 }
 
+void UPresentationFeedbackComponent::EmitFloorStarted(int32 FloorIndex, bool bFinale)
+{
+	EmitCue(static_cast<uint8>(m8presentation::Cue::FloorStart),
+		bFinale ? TEXT("FINAL FLOOR - THE WARDEN AWAITS")
+			: FString::Printf(TEXT("FLOOR %d"), FloorIndex),
+		90, bFinale ? 1.8 : 0.9);
+}
+
+void UPresentationFeedbackComponent::EmitWardenBroken()
+{
+	EmitCue(static_cast<uint8>(m8presentation::Cue::WardenBreak),
+		TEXT("WARDEN BROKEN - STRIKE NOW"), 95, 1.35);
+}
+
 void UPresentationFeedbackComponent::EmitRunWon()
 {
 	EmitCue(static_cast<uint8>(m8presentation::Cue::Victory), TEXT("RUN WON"), 100, 2.0);

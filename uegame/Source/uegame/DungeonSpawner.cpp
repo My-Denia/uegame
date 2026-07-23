@@ -26,6 +26,8 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationSystem.h"
 #include "TimerManager.h"
@@ -76,8 +78,11 @@ ADungeonSpawner::ADungeonSpawner()
 	// CDO construction; no static-in-lambda).
 	ConstructorHelpers::FObjectFinder<UStaticMesh> CubeFinder(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UStaticMesh* CubeMesh = CubeFinder.Succeeded() ? CubeFinder.Object : nullptr;
+	ConstructorHelpers::FObjectFinder<UMaterialInterface> MaterialFinder(
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	UMaterialInterface* ShapeMaterial = MaterialFinder.Succeeded() ? MaterialFinder.Object : nullptr;
 
-	auto MakeISM = [this, CubeMesh](const TCHAR* Name) -> UInstancedStaticMeshComponent*
+	auto MakeISM = [this, CubeMesh, ShapeMaterial](const TCHAR* Name) -> UInstancedStaticMeshComponent*
 	{
 		UInstancedStaticMeshComponent* Ism = CreateDefaultSubobject<UInstancedStaticMeshComponent>(Name);
 		Ism->SetupAttachment(Root);
@@ -87,6 +92,10 @@ ADungeonSpawner::ADungeonSpawner()
 		if (CubeMesh)
 		{
 			Ism->SetStaticMesh(CubeMesh);
+		}
+		if (ShapeMaterial)
+		{
+			Ism->SetMaterial(0, ShapeMaterial);
 		}
 		return Ism;
 	};
@@ -115,6 +124,7 @@ void ADungeonSpawner::BeginPlay()
 	{
 		Build();
 	}
+	ApplyPresentationTheme();
 
 	if (bSpawnNavBounds)
 	{
@@ -924,6 +934,61 @@ void ADungeonSpawner::Build()
 	bHasBuiltLayoutIdentity = true;
 }
 
+void ADungeonSpawner::ApplyPresentationTheme()
+{
+	if (!FloorISM || !WallISM || !CorridorISM || !DoorISM)
+	{
+		return;
+	}
+	if (!FloorMID)
+	{
+		FloorMID = FloorISM->CreateDynamicMaterialInstance(0);
+		WallMID = WallISM->CreateDynamicMaterialInstance(0);
+		CorridorMID = CorridorISM->CreateDynamicMaterialInstance(0);
+		DoorMID = DoorISM->CreateDynamicMaterialInstance(0);
+	}
+
+	int32 FloorIndex = 1;
+	if (const UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld());
+		FM && FM->IsRunActive())
+	{
+		FloorIndex = FMath::Clamp(FM->GetFloorIndex(), 1, 3);
+	}
+
+	const FLinearColor FloorColors[] = {
+		FLinearColor(0.025f, 0.055f, 0.085f),
+		FLinearColor(0.030f, 0.045f, 0.085f),
+		FLinearColor(0.065f, 0.030f, 0.070f)
+	};
+	const FLinearColor WallColors[] = {
+		FLinearColor(0.018f, 0.030f, 0.050f),
+		FLinearColor(0.020f, 0.025f, 0.052f),
+		FLinearColor(0.045f, 0.018f, 0.050f)
+	};
+	const FLinearColor CorridorColors[] = {
+		FLinearColor(0.035f, 0.120f, 0.145f),
+		FLinearColor(0.035f, 0.090f, 0.145f),
+		FLinearColor(0.125f, 0.040f, 0.120f)
+	};
+	const int32 PaletteIndex = FloorIndex - 1;
+	if (FloorMID)
+	{
+		FloorMID->SetVectorParameterValue(TEXT("Color"), FloorColors[PaletteIndex]);
+	}
+	if (WallMID)
+	{
+		WallMID->SetVectorParameterValue(TEXT("Color"), WallColors[PaletteIndex]);
+	}
+	if (CorridorMID)
+	{
+		CorridorMID->SetVectorParameterValue(TEXT("Color"), CorridorColors[PaletteIndex]);
+	}
+	if (DoorMID)
+	{
+		DoorMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.90f, 0.38f, 0.055f));
+	}
+}
+
 FObjectiveGridRoute ADungeonSpawner::ResolveObjectiveGridRoute(
 	const FVector& PawnLocation,
 	const FVector& TargetLocation,
@@ -1265,6 +1330,7 @@ bool ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 
 	SetSeed64(NewSeed);
 	Build();                 // ClearInstances + rebuild geometry from the new layout
+	ApplyPresentationTheme();
 	RefreshNavigation();     // re-dirty the whole map so the navmesh rebuilds in place
 
 	if (bTeleportPlayerToStart)

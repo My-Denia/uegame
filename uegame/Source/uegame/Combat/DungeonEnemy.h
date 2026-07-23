@@ -12,8 +12,10 @@
 
 class ADungeonSpawner;
 class UHealthComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 class UMaterialInstanceDynamic;
+class UPointLightComponent;
 class UTextRenderComponent;
 class AAIController;
 struct FEncounterArchetypeStats;
@@ -140,13 +142,31 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="Combat")
 	TObjectPtr<UStaticMeshComponent> BodyMesh;
 
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> GruntVisualMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> RunnerVisualMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> BruteVisualMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> WardenVisualMesh;
+
 	/** Persistent state-driven world label; it mirrors behavior truth and allocates no per-tick UObject. */
 	UPROPERTY(VisibleAnywhere, Category="Combat")
 	TObjectPtr<UTextRenderComponent> BehaviorText;
 
+	/** Finale-only ground aura and light. Hidden on every ordinary enemy. */
+	UPROPERTY(VisibleAnywhere, Category="Presentation")
+	TObjectPtr<UStaticMeshComponent> WardenAuraMesh;
+
+	UPROPERTY(VisibleAnywhere, Category="Presentation")
+	TObjectPtr<UPointLightComponent> WardenLight;
+
 	/** Dynamic material instance for the hit flash (created in BeginPlay). */
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> BodyMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WardenAuraMID;
 
 	FTimerHandle PursueTimer;
 	FTimerHandle BehaviorTimer;

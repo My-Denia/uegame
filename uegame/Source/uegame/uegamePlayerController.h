@@ -9,14 +9,29 @@
 class UInputMappingContext;
 class UUserWidget;
 
+enum class EUegameProductModal : uint8
+{
+	None = 0,
+	Restart,
+	Quit
+};
+
 /**
- *  Basic PlayerController class for a third person game
- *  Manages input mappings
+ *  PlayerController for the shipping product shell.
+ *  Gameplay truth remains in FloorManager; this class owns only local presentation modals
+ *  (welcome and confirmation) and routes ordinary keyboard input to that authority.
  */
 UCLASS(abstract)
 class AuegamePlayerController : public APlayerController
 {
 	GENERATED_BODY()
+
+public:
+	bool IsWelcomeVisible() const { return bWelcomeVisible; }
+	bool IsConfirmationVisible() const { return ProductModal != EUegameProductModal::None; }
+	bool IsBlockingGameplayInput() const { return bWelcomeVisible || IsConfirmationVisible(); }
+	FString GetConfirmationTitle() const;
+	FString GetConfirmationAction() const;
 	
 protected:
 
@@ -49,4 +64,16 @@ protected:
 	/** Returns true if the player should use UMG touch controls */
 	bool ShouldUseTouchControls() const;
 
+private:
+	void HandleAccept();
+	void HandlePauseOrCancel();
+	void HandleRestart();
+	void HandleQuit();
+	void OpenConfirmation(EUegameProductModal Modal);
+	void CancelConfirmation();
+	void ConfirmCurrentModal();
+
+	bool bWelcomeVisible = true;
+	bool bPausedForConfirmation = false;
+	EUegameProductModal ProductModal = EUegameProductModal::None;
 };

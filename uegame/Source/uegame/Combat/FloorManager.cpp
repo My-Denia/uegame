@@ -172,6 +172,14 @@ UUegameFloorManager* UUegameFloorManager::Get(UWorld* World)
 	return World->GetGameInstance()->GetSubsystem<UUegameFloorManager>();
 }
 
+double UUegameFloorManager::GetRunElapsedSeconds() const
+{
+	const UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	return World && bRunActive
+		? FMath::Max(0.0, static_cast<double>(World->GetTimeSeconds()) - RunStartedAtGameSeconds)
+		: 0.0;
+}
+
 ADungeonSpawner* UUegameFloorManager::FindSpawner() const
 {
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
@@ -273,6 +281,8 @@ void UUegameFloorManager::StartRun(uint64 InRunSeed)
 	RunSeed = InRunSeed;
 	bRunActive = true;
 	ResolveTokens = 0;
+	TotalClearedCombatRooms = 0;
+	RunStartedAtGameSeconds = static_cast<double>(World->GetTimeSeconds());
 	ClearRoomContractState();
 	RuntimeLifecycle.state = m8authority::RunState::Playing;
 	RefreshWorldPause();
@@ -369,6 +379,13 @@ void UUegameFloorManager::StartFloor(int32 NewFloorIndex)
 		static_cast<unsigned long long>(RunSeed),
 		static_cast<unsigned long long>(FloorSeed),
 		PawnHP, PawnMax, ResolveTokens, static_cast<int32>(Spawner->GetFinaleInitState()));
+	if (FloorIndex > 1)
+	{
+		if (UPresentationFeedbackComponent* Presentation = FindPlayerPresentation())
+		{
+			Presentation->EmitFloorStarted(FloorIndex, FinaleConfig != nullptr);
+		}
+	}
 
 	if (RequiredCombatRooms == 0)
 	{
@@ -996,6 +1013,7 @@ void UUegameFloorManager::NotifyRoomCleared(
 
 	ClearedRoomIndices.Add(RoomIndex);
 	ClearedCombatRooms = FMath::Min(ActualCombatRooms, ClearedCombatRooms + 1);
+	++TotalClearedCombatRooms;
 	const FCombatConfigRow& Cfg = FUegameCombatConfig::Get();
 	const float RoleFraction = static_cast<float>(m8room::room_fraction(
 		static_cast<m8room::Role>(CachedRole), GetRoomFlowConfig(Cfg)));

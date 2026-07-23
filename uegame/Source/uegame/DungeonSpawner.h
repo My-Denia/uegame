@@ -15,6 +15,7 @@
 #include "DungeonSpawner.generated.h"
 
 class UInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
 class ADungeonEnemy;
 struct FCombatConfigRow;
 
@@ -298,6 +299,8 @@ private:
 	 *  out so floor transitions can reuse it). */
 	void RefreshNavigation();
 	void ResetFinaleState();
+	/** Presentation-only material palette; instance transforms and deterministic plan stay untouched. */
+	void ApplyPresentationTheme();
 
 	/** M4: 64-bit runtime seed (floor seeds exceed int32). */
 	uint64 Seed64 = 0;
@@ -322,6 +325,15 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<UInstancedStaticMeshComponent> DoorISM;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> FloorMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WallMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> CorridorMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> DoorMID;
 
 	/** Absolute world position of the start room center; written by Build(). */
 	FVector StartWorld = FVector::ZeroVector;

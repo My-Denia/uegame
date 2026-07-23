@@ -28,6 +28,7 @@
 #include "../Combat/LoadoutComponent.h"
 #include "../DungeonSpawner.h"
 #include "../Presentation/PresentationFeedbackComponent.h"
+#include "../uegamePlayerController.h"
 
 #include "m8_objective_compass.hpp"
 #include "m8_presentation.hpp"
@@ -82,11 +83,12 @@ namespace
 		FLinearColor Color = FLinearColor::White;
 	};
 
-	const FLinearColor kHeader(0.62f, 0.84f, 1.00f, 1.0f);   // light blue section header
-	const FLinearColor kBody  (0.93f, 0.93f, 0.93f, 1.0f);   // near-white body text
-	const FLinearColor kAccent(1.00f, 0.84f, 0.20f, 1.0f);   // yellow: reward / attention
-	const FLinearColor kDim   (0.60f, 0.60f, 0.60f, 1.0f);   // dim: unavailable / stale
-	const FLinearColor kPanelBg(0.0f, 0.0f, 0.0f, 0.55f);    // translucent black backing
+	const FLinearColor kHeader(0.30f, 0.88f, 1.00f, 1.0f);   // cyan: identity / information
+	const FLinearColor kBody  (0.94f, 0.97f, 1.00f, 1.0f);   // cool white body text
+	const FLinearColor kAccent(1.00f, 0.68f, 0.16f, 1.0f);   // amber: choice / action
+	const FLinearColor kDim   (0.55f, 0.64f, 0.72f, 1.0f);   // blue-gray: secondary detail
+	const FLinearColor kPanelBg(0.015f, 0.035f, 0.065f, 0.86f); // deep navy backing
+	const FLinearColor kModalVeil(0.005f, 0.012f, 0.025f, 0.78f);
 	constexpr float kRouteThreatAcquireRangeCm = 450.0f;
 	constexpr float kRouteThreatHoldRangeCm = 750.0f;
 
@@ -937,6 +939,7 @@ void AUegameHUD::DrawHUD()
 
 	UWorld* World = GetWorld();
 	APlayerController* PC = GetOwningPlayerController();
+	AuegamePlayerController* ProductPC = Cast<AuegamePlayerController>(PC);
 	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
 	ULoadoutComponent* LC = Pawn ? Pawn->FindComponentByClass<ULoadoutComponent>() : nullptr;
 	UBuildSynergyComponent* Synergy = Pawn
@@ -1249,9 +1252,30 @@ void AUegameHUD::DrawHUD()
 	DrawPanel(this, Font, FMath::Max(24.0f, (Canvas->SizeX - ObjectivePanelW) * 0.5f),
 		ObjectiveY, Objective, Scale);
 
-	// ---------------- Center: onboarding plus authoritative pause/result flow ----------------
+	// ---------------- Center: product shell plus authoritative pause/result flow ----------------
 	TArray<FHudLine> Center;
-	if (FM && FM->IsRunActive())
+	bool bDimSceneForModal = false;
+	bool bTitlePresentation = false;
+	bool bConfirmationPresentation = false;
+	if (ProductPC && ProductPC->IsWelcomeVisible())
+	{
+		bDimSceneForModal = true;
+		bTitlePresentation = true;
+		Center.Add({ TEXT("WARDENFALL"), kAccent });
+		Center.Add({ TEXT("FORGE A BUILD. CLEAR THREE FLOORS. BREAK THE WARDEN."), kHeader });
+		Center.Add({ TEXT("ENTER / SPACE   BEGIN"), kBody });
+		Center.Add({ TEXT("WASD Move   Mouse Look   F Attack"), kDim });
+		Center.Add({ TEXT("Q   Quit to Desktop"), kDim });
+	}
+	else if (ProductPC && ProductPC->IsConfirmationVisible())
+	{
+		bDimSceneForModal = true;
+		bConfirmationPresentation = true;
+		Center.Add({ ProductPC->GetConfirmationTitle(), kAccent });
+		Center.Add({ ProductPC->GetConfirmationAction(), kBody });
+		Center.Add({ TEXT("ESC   CANCEL"), kDim });
+	}
+	else if (FM && FM->IsRunActive())
 	{
 		const m8authority::RunState RunState = FM->GetRunState();
 		const bool bResultVisible =
@@ -1274,27 +1298,63 @@ void AUegameHUD::DrawHUD()
 		switch (Overlay)
 		{
 		case m8presentation::Overlay::Result:
+			bDimSceneForModal = true;
+			{
+				const int32 TotalSeconds = FMath::Max(0, FMath::RoundToInt(FM->GetRunElapsedSeconds()));
+				const FString TimeLine = FString::Printf(TEXT("TIME  %02d:%02d     ROOMS CLEARED  %d"),
+					TotalSeconds / 60, TotalSeconds % 60, FM->GetTotalClearedCombatRooms());
+				FString BuildLine(TEXT("BUILD  UNFORMED"));
+				if (Synergy)
+				{
+					TArray<FString> Identities;
+					if (Synergy->GetExecutionerRank() > 0)
+					{
+						Identities.Add(FString::Printf(TEXT("EXECUTIONER R%d"), Synergy->GetExecutionerRank()));
+					}
+					if (Synergy->GetTempoRank() > 0)
+					{
+						Identities.Add(FString::Printf(TEXT("TEMPO R%d"), Synergy->GetTempoRank()));
+					}
+					if (Synergy->GetBulwarkRank() > 0)
+					{
+						Identities.Add(FString::Printf(TEXT("BULWARK R%d"), Synergy->GetBulwarkRank()));
+					}
+					if (Identities.Num() > 0)
+					{
+						BuildLine = FString::Printf(TEXT("BUILD  %s"), *FString::Join(Identities, TEXT(" / ")));
+					}
+				}
 			if (RunState == m8authority::RunState::Won)
 			{
-				Center.Add({ TEXT("RUN WON"), FLinearColor(0.35f, 1.0f, 0.45f, 1.0f) });
-				Center.Add({ TEXT("R Play Again    Q Quit"), kBody });
+				Center.Add({ TEXT("WARDEN DEFEATED"), FLinearColor(0.35f, 1.0f, 0.65f, 1.0f) });
+				Center.Add({ TEXT("VICTORY"), kHeader });
+				Center.Add({ TimeLine, kBody });
+				Center.Add({ BuildLine, kDim });
+				Center.Add({ TEXT("R   PLAY AGAIN      Q   QUIT"), kBody });
 			}
 			else if (RunState == m8authority::RunState::Failed)
 			{
-				Center.Add({ TEXT("RUN FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
-				Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+				Center.Add({ TEXT("THE RUN ENDS HERE"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ FString::Printf(TEXT("REACHED FLOOR %d"), FM->GetFloorIndex()), kHeader });
+				Center.Add({ TimeLine, kBody });
+				Center.Add({ BuildLine, kDim });
+				Center.Add({ TEXT("R   TRY AGAIN      Q   QUIT"), kBody });
 			}
 			else
 			{
 				Center.Add({ TEXT("FINAL CHALLENGE ERROR"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
-				Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+				Center.Add({ TEXT("R   RESTART      Q   QUIT"), kBody });
+			}
 			}
 			break;
 		case m8presentation::Overlay::Pause:
+			bDimSceneForModal = true;
 			Center.Add({ TEXT("PAUSED"), kAccent });
-			Center.Add({ TEXT("Esc Resume    R Restart    Q Quit"), kBody });
+			Center.Add({ TEXT("ESC   RESUME"), kBody });
+			Center.Add({ TEXT("R   Restart Run      Q   Quit"), kDim });
 			break;
 		case m8presentation::Overlay::Contract:
+			bDimSceneForModal = true;
 			Center.Add({ TEXT("CHOOSE YOUR ROUTE"), kAccent });
 			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  Recover 25%% HP now"),
 				FM->GetSecureContractRoom()), kBody });
@@ -1303,6 +1363,7 @@ void AUegameHUD::DrawHUD()
 			Center.Add({ TEXT("Clear challenge: recover 50% HP + gain 1 Resolve"), kDim });
 			break;
 		case m8presentation::Overlay::Reward:
+			bDimSceneForModal = true;
 			if (LC && LC->GetCurrentOfferIds().Num() == 3)
 			{
 				Center.Add({ TEXT("CHOOSE AN UPGRADE"), kAccent });
@@ -1344,13 +1405,23 @@ void AUegameHUD::DrawHUD()
 	}
 	if (Center.Num() > 0)
 	{
+		if (bDimSceneForModal)
+		{
+			DrawRect(kModalVeil, 0.0f, 0.0f, Canvas->SizeX, Canvas->SizeY);
+		}
+		const float CenterScale = bTitlePresentation
+			? Scale * 1.55f
+			: (bConfirmationPresentation ? Scale * 1.2f : Scale);
 		float CenterW = 0.0f, CenterLineH = 0.0f;
-		MeasurePanel(this, Font, Center, Scale, CenterW, CenterLineH);
-		const float CenterPanelW = CenterW + 2.0f * (8.0f * Scale);
+		MeasurePanel(this, Font, Center, CenterScale, CenterW, CenterLineH);
+		const float CenterPanelW = CenterW + 2.0f * (8.0f * CenterScale);
 		const float CenterPanelH = Center.Num() * CenterLineH
-			+ FMath::Max(0, Center.Num() - 1) * 3.0f * Scale + 16.0f * Scale;
+			+ FMath::Max(0, Center.Num() - 1) * 3.0f * CenterScale + 16.0f * CenterScale;
+		const float CenterY = (bTitlePresentation || bConfirmationPresentation)
+			? FMath::Max(24.0f, (Canvas->SizeY - CenterPanelH) * 0.48f)
+			: FMath::Max(24.0f, ObjectiveY - 12.0f * Scale - CenterPanelH);
 		DrawPanel(this, Font, (Canvas->SizeX - CenterPanelW) * 0.5f,
-			FMath::Max(24.0f, ObjectiveY - 12.0f * Scale - CenterPanelH), Center, Scale);
+			CenterY, Center, CenterScale);
 	}
 
 	// One transient cue lane. Presentation priority wins; the existing synergy component remains
@@ -1360,7 +1431,7 @@ void AUegameHUD::DrawHUD()
 	{
 		TransientCue = Synergy->GetFeedbackText();
 	}
-	if (!TransientCue.IsEmpty())
+	if (!bDimSceneForModal && !TransientCue.IsEmpty())
 	{
 		TArray<FHudLine> CueLines;
 		CueLines.Add({ TransientCue, kAccent });
@@ -1369,6 +1440,13 @@ void AUegameHUD::DrawHUD()
 		DrawPanel(this, Font,
 			FMath::Max(24.0f, (Canvas->SizeX - CueW - 16.0f * Scale) * 0.5f),
 			Canvas->SizeY * 0.72f, CueLines, Scale * 1.25f);
+	}
+
+	// Modal choices and terminal screens are the sole foreground layer. Enemy labels behind
+	// them would read as interactive and visually compete with the player's current decision.
+	if (bDimSceneForModal)
+	{
+		return;
 	}
 
 	// ---------------- M7A.2: per-enemy readout (nameplates + HP bars) ----------------

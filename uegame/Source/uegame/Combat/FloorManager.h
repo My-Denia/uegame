@@ -50,6 +50,8 @@ public:
 	int32 GetFloorIndex() const { return FloorIndex; }
 	m8authority::RunState GetRunState() const { return RuntimeLifecycle.state; }
 	int32 GetClearedCombatRooms() const { return ClearedCombatRooms; }
+	int32 GetTotalClearedCombatRooms() const { return TotalClearedCombatRooms; }
+	double GetRunElapsedSeconds() const;
 	int32 GetRequiredCombatRooms() const { return RequiredCombatRooms; }
 	int32 GetActualCombatRooms() const { return ActualCombatRooms; }
 	bool IsFloorObjectiveComplete() const { return bFloorObjectiveComplete; }
@@ -181,6 +183,8 @@ private:
 	EPendingTransition PendingTransition = EPendingTransition::None;
 	m8authority::Lifecycle RuntimeLifecycle;
 	int32 ClearedCombatRooms = 0;
+	int32 TotalClearedCombatRooms = 0;
+	double RunStartedAtGameSeconds = 0.0;
 	int32 RequiredCombatRooms = 0;
 	int32 ActualCombatRooms = 0;
 	TSet<int32> ClearedRoomIndices;

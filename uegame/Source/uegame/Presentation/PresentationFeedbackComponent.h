@@ -24,6 +24,8 @@ public:
 	void EmitRewardOffered();
 	void EmitRewardChosen(const FString& AffixName);
 	void EmitBuildProc(const FString& ProcText);
+	void EmitFloorStarted(int32 FloorIndex, bool bFinale);
+	void EmitWardenBroken();
 	void EmitRunWon();
 	void EmitRunFailed();
 

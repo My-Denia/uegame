@@ -22,6 +22,17 @@
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "uegame.h"
+#include "uegamePlayerController.h"
+
+namespace
+{
+bool IsProductShellBlocking(const AuegameCharacter* Character)
+{
+	const AuegamePlayerController* PC = Character
+		? Cast<AuegamePlayerController>(Character->GetController()) : nullptr;
+	return PC && PC->IsBlockingGameplayInput();
+}
+}
 
 AuegameCharacter::AuegameCharacter()
 {
@@ -89,6 +100,10 @@ void AuegameCharacter::BeginPlay()
 
 void AuegameCharacter::DoChooseLoadout(int32 Index)
 {
+	if (IsProductShellBlocking(this))
+	{
+		return;
+	}
 	// Route through the FloorManager: it applies the pick on the loadout component AND re-pokes the stairs
 	// so a player already standing on the pad descends once the reward is taken (single choice code path
 	// shared by Dungeon.ChooseLoadout and keys 1/2/3). No-op outside an active run.
@@ -143,7 +158,7 @@ void AuegameCharacter::HandlePlayerDamaged(float Amount, AActor* /*DamageInstiga
 
 void AuegameCharacter::DoAttack()
 {
-	if (Combat)
+	if (!IsProductShellBlocking(this) && Combat)
 	{
 		Combat->TryAttack();
 	}
@@ -200,12 +215,6 @@ void AuegameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 		PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey2)
 			.bExecuteWhenPaused = true;
 
-		PlayerInputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AuegameCharacter::DoTogglePause)
-			.bExecuteWhenPaused = true;
-		PlayerInputComponent->BindKey(EKeys::R, IE_Pressed, this, &AuegameCharacter::DoManualRestart)
-			.bExecuteWhenPaused = true;
-		PlayerInputComponent->BindKey(EKeys::Q, IE_Pressed, this, &AuegameCharacter::DoQuit)
-			.bExecuteWhenPaused = true;
 	}
 	else
 	{
@@ -233,7 +242,7 @@ void AuegameCharacter::Look(const FInputActionValue& Value)
 
 void AuegameCharacter::DoMove(float Right, float Forward)
 {
-	if (GetController() != nullptr)
+	if (!IsProductShellBlocking(this) && GetController() != nullptr)
 	{
 		// find out which way is forward
 		const FRotator Rotation = GetController()->GetControlRotation();
@@ -253,7 +262,7 @@ void AuegameCharacter::DoMove(float Right, float Forward)
 
 void AuegameCharacter::DoLook(float Yaw, float Pitch)
 {
-	if (GetController() != nullptr)
+	if (!IsProductShellBlocking(this) && GetController() != nullptr)
 	{
 		// add yaw and pitch input to controller
 		AddControllerYawInput(Yaw);
@@ -263,8 +272,10 @@ void AuegameCharacter::DoLook(float Yaw, float Pitch)
 
 void AuegameCharacter::DoJumpStart()
 {
-	// signal the character to jump
-	Jump();
+	if (!IsProductShellBlocking(this))
+	{
+		Jump();
+	}
 }
 
 void AuegameCharacter::DoJumpEnd()

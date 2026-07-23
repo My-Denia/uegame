@@ -7,8 +7,10 @@
 #include "EncounterConfig.h"
 #include "HealthComponent.h"
 #include "../DungeonSpawner.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 #include "CollisionQueryParams.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Engine/HitResult.h"
@@ -32,6 +34,9 @@
 namespace
 {
 	const FLinearColor kEnemyBaseColor(0.35f, 0.04f, 0.04f);
+	const FLinearColor kGruntBaseColor(0.68f, 0.08f, 0.035f);
+	const FLinearColor kRunnerBaseColor(0.035f, 0.42f, 0.78f);
+	const FLinearColor kBruteBaseColor(0.46f, 0.07f, 0.56f);
 	const FLinearColor kEnemyFlashColor(1.0f, 1.0f, 1.0f);
 	const FLinearColor kWindupColor(1.0f, 0.48f, 0.02f);
 	const FLinearColor kRunnerCircleColor(0.05f, 0.55f, 0.95f);
@@ -95,6 +100,17 @@ namespace
 		default: return kEnemyBaseColor;
 		}
 	}
+
+	FLinearColor ArchetypeRestingColor(int32 ArchetypeTypeId)
+	{
+		switch (ArchetypeTypeId)
+		{
+		case 1: return kRunnerBaseColor;
+		case 2: return kBruteBaseColor;
+		case 0:
+		default: return kGruntBaseColor;
+		}
+	}
 }
 
 ADungeonEnemy::ADungeonEnemy()
@@ -108,6 +124,13 @@ ADungeonEnemy::ADungeonEnemy()
 	BodyMesh->SetupAttachment(GetCapsuleComponent());
 	BodyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cone(TEXT("/Engine/BasicShapes/Cone.Cone"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cylinder(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	GruntVisualMesh = Cube.Succeeded() ? Cube.Object : (Sphere.Succeeded() ? Sphere.Object : nullptr);
+	RunnerVisualMesh = Cone.Succeeded() ? Cone.Object : (Sphere.Succeeded() ? Sphere.Object : nullptr);
+	BruteVisualMesh = Sphere.Succeeded() ? Sphere.Object : nullptr;
+	WardenVisualMesh = Cylinder.Succeeded() ? Cylinder.Object : (Sphere.Succeeded() ? Sphere.Object : nullptr);
 	if (Sphere.Succeeded())
 	{
 		BodyMesh->SetStaticMesh(Sphere.Object);
@@ -121,6 +144,28 @@ ADungeonEnemy::ADungeonEnemy()
 	{
 		BodyMesh->SetMaterial(0, ShapeMat.Object);
 	}
+
+	WardenAuraMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WardenAuraMesh"));
+	WardenAuraMesh->SetupAttachment(GetCapsuleComponent());
+	WardenAuraMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WardenAuraMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -86.0f));
+	WardenAuraMesh->SetRelativeScale3D(FVector(1.8f, 1.8f, 0.035f));
+	WardenAuraMesh->SetVisibility(false);
+	if (Cylinder.Succeeded())
+	{
+		WardenAuraMesh->SetStaticMesh(Cylinder.Object);
+	}
+	if (ShapeMat.Succeeded())
+	{
+		WardenAuraMesh->SetMaterial(0, ShapeMat.Object);
+	}
+
+	WardenLight = CreateDefaultSubobject<UPointLightComponent>(TEXT("WardenLight"));
+	WardenLight->SetupAttachment(GetCapsuleComponent());
+	WardenLight->SetRelativeLocation(FVector(0.0f, 0.0f, 90.0f));
+	WardenLight->SetAttenuationRadius(750.0f);
+	WardenLight->SetIntensity(0.0f);
+	WardenLight->SetCastShadows(false);
 
 	BehaviorText = CreateDefaultSubobject<UTextRenderComponent>(TEXT("BehaviorText"));
 	BehaviorText->SetupAttachment(GetCapsuleComponent());
@@ -192,9 +237,25 @@ void ADungeonEnemy::ApplyArchetype(const FEncounterArchetypeStats& Stats, float 
 	// == 88, so offset = 88*(s-1)). The capsule, nav agent, and ContactRange are deliberately
 	// NOT touched - collision and contact behaviour must not vary by archetype.
 	const float S = Stats.VisualScale;
-	if (BodyMesh && !FMath::IsNearlyEqual(S, 1.0f))
+	if (BodyMesh)
 	{
-		BodyMesh->SetRelativeScale3D(FVector(0.68f * S, 0.68f * S, 1.76f * S));
+		UStaticMesh* VisualMesh = GruntVisualMesh;
+		FVector BaseScale(0.72f, 0.72f, 1.76f);
+		if (InTypeId == 1)
+		{
+			VisualMesh = RunnerVisualMesh;
+			BaseScale = FVector(0.58f, 0.58f, 1.76f);
+		}
+		else if (InTypeId == 2)
+		{
+			VisualMesh = BruteVisualMesh;
+			BaseScale = FVector(0.78f, 0.78f, 1.76f);
+		}
+		if (VisualMesh)
+		{
+			BodyMesh->SetStaticMesh(VisualMesh);
+		}
+		BodyMesh->SetRelativeScale3D(BaseScale * S);
 		BodyMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 88.0f * (S - 1.0f)));
 	}
 
@@ -246,6 +307,7 @@ bool ADungeonEnemy::ConfigureAsWarden(const FCombatConfigRow& Row, int32 Resolve
 	const float OldBaseMoveSpeed = BaseMoveSpeed;
 	const FVector OldMeshScale = BodyMesh->GetRelativeScale3D();
 	const FVector OldMeshLocation = BodyMesh->GetRelativeLocation();
+	UStaticMesh* OldVisualMesh = BodyMesh->GetStaticMesh();
 
 	AssignedContactDamage = Row.WardenContactDamage;
 	ContactDamage = static_cast<float>(m8enemy::scale_contact_damage(
@@ -256,9 +318,13 @@ bool ADungeonEnemy::ConfigureAsWarden(const FCombatConfigRow& Row, int32 Resolve
 	BaseMoveSpeed = Row.WardenMoveSpeed;
 	GetCharacterMovement()->MaxWalkSpeed = BaseMoveSpeed;
 	Health->Init(Row.WardenMaxHP);
+	if (WardenVisualMesh)
+	{
+		BodyMesh->SetStaticMesh(WardenVisualMesh);
+	}
 	BodyMesh->SetRelativeScale3D(FVector(
-		0.68f * Row.WardenMeshScale,
-		0.68f * Row.WardenMeshScale,
+		0.82f * Row.WardenMeshScale,
+		0.82f * Row.WardenMeshScale,
 		1.76f * Row.WardenMeshScale));
 	BodyMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 88.0f * (Row.WardenMeshScale - 1.0f)));
 
@@ -280,6 +346,7 @@ bool ADungeonEnemy::ConfigureAsWarden(const FCombatConfigRow& Row, int32 Resolve
 		Health->SetHP(OldHP);
 		BodyMesh->SetRelativeScale3D(OldMeshScale);
 		BodyMesh->SetRelativeLocation(OldMeshLocation);
+		BodyMesh->SetStaticMesh(OldVisualMesh);
 		ResetWardenState();
 		UE_LOG(LogTemp, Warning,
 			TEXT("[WardenInit] rollback=true room=%d ordinal=%d sourceType=%d"),
@@ -288,6 +355,7 @@ bool ADungeonEnemy::ConfigureAsWarden(const FCombatConfigRow& Row, int32 Resolve
 	}
 
 	bWarden = true;
+	WardenAuraMesh->SetVisibility(true);
 	WardenMaxGuard = NewState.max_guard;
 	WardenGuard = NewState.guard;
 	WardenGuardBrokenAtMs = NewState.guard_broken_at_ms;
@@ -361,6 +429,7 @@ void ADungeonEnemy::BeginPlay()
 	{
 		BodyMID->SetVectorParameterValue(TEXT("Color"), kEnemyBaseColor);
 	}
+	WardenAuraMID = WardenAuraMesh->CreateDynamicMaterialInstance(0);
 
 	ResetBehaviorState();
 	GetWorldTimerManager().SetTimer(PursueTimer, this, &ADungeonEnemy::PursueTick, 0.5f, true, 0.5f);
@@ -372,6 +441,14 @@ void ADungeonEnemy::BeginPlay()
 void ADungeonEnemy::ResetWardenState()
 {
 	bWarden = false;
+	if (WardenAuraMesh)
+	{
+		WardenAuraMesh->SetVisibility(false);
+	}
+	if (WardenLight)
+	{
+		WardenLight->SetIntensity(0.0f);
+	}
 	WardenMaxGuard = 0;
 	WardenGuard = 0;
 	WardenGuardBrokenAtMs = -1;
@@ -454,6 +531,10 @@ void ADungeonEnemy::ApplyBehaviorPresentation()
 {
 	const m8enemy::Phase Phase = static_cast<m8enemy::Phase>(BehaviorPhase);
 	FLinearColor RestingColor = BehaviorColor(Phase);
+	if (!bWarden && (Phase == m8enemy::Phase::Dormant || Phase == m8enemy::Phase::Approach))
+	{
+		RestingColor = ArchetypeRestingColor(ArchetypeTypeId);
+	}
 	if (BehaviorText)
 	{
 		FString Label(BehaviorLabel(Phase, BehaviorArchetype(bWarden ? 2 : ArchetypeTypeId)));
@@ -493,6 +574,19 @@ void ADungeonEnemy::ApplyBehaviorPresentation()
 	if (BodyMID)
 	{
 		BodyMID->SetVectorParameterValue(TEXT("Color"), RestingColor);
+	}
+	if (bWarden)
+	{
+		if (WardenAuraMID)
+		{
+			WardenAuraMID->SetVectorParameterValue(TEXT("Color"), RestingColor);
+		}
+		if (WardenLight)
+		{
+			WardenLight->SetLightColor(RestingColor);
+			WardenLight->SetIntensity(
+				GetWardenPhase() == EUegameWardenPhase::Staggered ? 5200.0f : 2800.0f);
+		}
 	}
 }
 
@@ -1037,6 +1131,14 @@ int32 ADungeonEnemy::ApplyPlayerDamage(int32 Amount, AActor* DamageInstigator)
 		}
 		GetCharacterMovement()->MaxWalkSpeed = 0.0f;
 		ApplyBehaviorPresentation();
+		if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+		{
+			if (UPresentationFeedbackComponent* Presentation =
+				Player->FindComponentByClass<UPresentationFeedbackComponent>())
+			{
+				Presentation->EmitWardenBroken();
+			}
+		}
 		UE_LOG(LogTemp, Display,
 			TEXT("[WardenPhase] room=%d ordinal=%d phase=Staggered guard=0 durationMs=%lld damagePct=%d"),
 			RoomIndex, SpawnOrdinal, static_cast<long long>(WardenStaggerMs),
