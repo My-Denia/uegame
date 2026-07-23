@@ -59,6 +59,33 @@ struct FChallengeContractTransactionResult
 	TArray<int64> RolledBackIds;
 };
 
+enum class EObjectiveGridRouteResult : uint8
+{
+	ReadyNext,
+	ReadyRecenter,
+	ReadyTarget,
+	IdentityUnavailable,
+	IdentityMismatch,
+	InvalidEndpoint,
+	Unreachable,
+	LocalSegmentBlocked
+};
+
+struct FObjectiveGridRoute
+{
+	EObjectiveGridRouteResult Result = EObjectiveGridRouteResult::IdentityUnavailable;
+	FVector Waypoint = FVector::ZeroVector;
+	int32 PathCellCount = 0;
+	uint64 BuiltPlanHash = 0;
+
+	bool IsReady() const
+	{
+		return Result == EObjectiveGridRouteResult::ReadyNext
+			|| Result == EObjectiveGridRouteResult::ReadyRecenter
+			|| Result == EObjectiveGridRouteResult::ReadyTarget;
+	}
+};
+
 UCLASS()
 class UEGAME_API ADungeonSpawner : public AActor
 {
@@ -226,6 +253,20 @@ public:
 	/** m2 anchors for the same plan, cached at spawn time (baseline-unchanged evidence). */
 	uint64 GetCachedSpawnPlanHash() const { return CachedSpawnPlanHash; }
 	uint64 GetCachedEnemyPlanHash() const { return CachedEnemyPlanHash; }
+	/** Presentation route identity published only after Build() completes successfully. */
+	bool HasBuiltLayoutIdentity() const { return bHasBuiltLayoutIdentity; }
+	uint64 GetBuiltSpawnPlanHash() const { return BuiltSpawnPlanHash; }
+	/** Recast-independent shortest-grid fallback over the exact last-built layout identity.
+	 *  It returns only an immediate locally swept waypoint and never moves gameplay actors. */
+	FObjectiveGridRoute ResolveObjectiveGridRoute(
+		const FVector& PawnLocation,
+		const FVector& TargetLocation,
+		float AgentRadius) const;
+	/** Same identity/topology proof without a local sweep, used only to rank objective rooms. */
+	bool TryMeasureObjectiveGridPath(
+		const FVector& StartLocation,
+		const FVector& TargetLocation,
+		double& OutLength) const;
 	/** One m6::RoleId-as-int per room index. */
 	const TArray<int32>& GetCachedRoomRoles() const { return CachedRoomRoles; }
 	/** Per-room spawned archetype counts (X=Grunt, Y=Runner, Z=Brute). */
@@ -261,6 +302,11 @@ private:
 	/** M4: 64-bit runtime seed (floor seeds exceed int32). */
 	uint64 Seed64 = 0;
 	bool bHasSeed64 = false;
+	bool bHasBuiltLayoutIdentity = false;
+	uint64 BuiltSeed64 = 0;
+	float BuiltTileSize = 0.0f;
+	float BuiltWallHeight = 0.0f;
+	uint64 BuiltSpawnPlanHash = 0;
 
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<USceneComponent> Root;

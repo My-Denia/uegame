@@ -1,6 +1,7 @@
 // Table-driven gate for objective ordering and exact camera-relative sectors.
 #include "m8_objective_compass.hpp"
 #include "m8_grid_route.hpp"
+#include "dungeon.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -52,29 +53,76 @@ int main()
 				&& walkable[static_cast<std::size_t>(m8grid::index_of(5, path[i]))] != 0;
 		}
 		check(path_is_valid, "grid BFS emits only adjacent walkable cells");
-		const m8grid::Cell nearest = m8grid::nearest_walkable(
-			3, 1, { 1, 0, 1 }, { 1, 0 });
-		check(nearest.x == 0 && nearest.y == 0,
-			"equidistant projection uses lower row-major cell deterministically");
+		check(m8grid::shortest_path(3, 1, { 1, 0, 1 }, { 1, 0 }, { 2, 0 }).empty(),
+			"wall endpoint fails closed");
+		check(m8grid::shortest_path(3, 1, { 1, 1, 1 }, { -1, 0 }, { 2, 0 }).empty(),
+			"out-of-bounds endpoint fails closed");
+		const std::vector<m8grid::Cell> same_cell = m8grid::shortest_path(
+			2, 2, { 1, 1, 1, 1 }, { 1, 1 }, { 1, 1 });
+		check(same_cell.size() == 1 && same_cell.front().x == 1 && same_cell.front().y == 1,
+			"start equals goal returns one cell");
+
+		const std::vector<m8grid::Cell> tied = m8grid::shortest_path(
+			2, 2, { 1, 1, 1, 1 }, { 0, 0 }, { 1, 1 });
+		check(tied.size() == 3 && tied[1].x == 1 && tied[1].y == 0,
+			"equal-length tie uses stable east-south-west-north expansion");
+
+		check(m8grid::world_to_cell(0.0, 199.999, 0.0, 0.0, 200.0).x == 0
+			&& m8grid::world_to_cell(0.0, 199.999, 0.0, 0.0, 200.0).y == 0,
+			"world mapping keeps points below the positive tile boundary in cell zero");
+		check(m8grid::world_to_cell(200.0, 400.0, 0.0, 0.0, 200.0).x == 1
+			&& m8grid::world_to_cell(200.0, 400.0, 0.0, 0.0, 200.0).y == 2,
+			"world mapping advances exactly on positive tile boundaries");
+		check(m8grid::world_to_cell(-0.001, -200.0, 0.0, 0.0, 200.0).x == -1
+			&& m8grid::world_to_cell(-0.001, -200.0, 0.0, 0.0, 200.0).y == -1,
+			"world mapping floors negative coordinates");
+		check(m8grid::world_to_cell(0.0, 0.0, 0.0, 0.0, 0.0).x == -1,
+			"invalid tile size fails closed");
+		check(m8grid::is_exact_positive_integer_step(200.0),
+			"integral world step is eligible for built route identity");
+		check(!m8grid::is_exact_positive_integer_step(200.5)
+				&& !m8grid::is_exact_positive_integer_step(0.0),
+			"fractional and non-positive world steps cannot publish route identity");
 
 		const std::vector<m8grid::Cell> east_path{ { 37, 16 }, { 38, 16 }, { 39, 16 } };
-		m8grid::FeasibleWaypoint feasible = m8grid::next_feasible_waypoint(
-			east_path, 37.8165, 16.1750);
-		check(feasible.recenter
-			&& std::abs(feasible.x - 37.5) < 0.000001
-			&& std::abs(feasible.y - 16.5) < 0.000001,
-			"off-centre east travel first uses the stable current cell centre");
-		feasible = m8grid::next_feasible_waypoint(east_path, 37.8165, 16.46);
-		check(!feasible.recenter
-			&& std::abs(feasible.x - 38.5) < 0.000001
-			&& std::abs(feasible.y - 16.5) < 0.000001,
-			"centred east travel uses the immediate BFS successor");
-		const std::vector<m8grid::Cell> north_path{ { 4, 7 }, { 4, 8 } };
-		feasible = m8grid::next_feasible_waypoint(north_path, 4.12, 7.78);
-		check(feasible.recenter
-			&& std::abs(feasible.x - 4.5) < 0.000001
-			&& std::abs(feasible.y - 7.5) < 0.000001,
-			"off-centre north travel first uses the stable current cell centre");
+		const m8grid::WaypointCandidates candidates =
+			m8grid::ordered_waypoint_candidates(east_path);
+		check(candidates.has_primary && candidates.primary.x == 38 && candidates.primary.y == 16
+			&& candidates.has_fallback && candidates.fallback.x == 37
+			&& candidates.fallback.y == 16,
+			"candidate order tries immediate successor then current centre");
+		check(m8grid::choose_clear_candidate(candidates, true, true)
+				== m8grid::CandidateChoice::Primary,
+			"clear immediate successor wins without recentering");
+		check(m8grid::choose_clear_candidate(candidates, false, true)
+				== m8grid::CandidateChoice::Fallback,
+			"blocked corner uses clear current-cell centre");
+		check(m8grid::choose_clear_candidate(candidates, false, false)
+				== m8grid::CandidateChoice::Blocked,
+			"two blocked local sweeps fail closed");
+		check(m8grid::choose_clear_candidate({}, true, true)
+				== m8grid::CandidateChoice::Blocked,
+			"missing built route identity has no candidate");
+
+		dungeon::Config fixed_config;
+		fixed_config.seed = 9706775287700491060ULL;
+		const dungeon::Layout fixed_layout = dungeon::generate(fixed_config);
+		std::vector<std::uint8_t> fixed_walkable;
+		fixed_walkable.reserve(fixed_layout.grid.size());
+		for (const dungeon::Tile tile : fixed_layout.grid)
+		{
+			fixed_walkable.push_back(dungeon::isPassable(tile) ? 1u : 0u);
+		}
+		const dungeon::Room& fixed_start_room = fixed_layout.rooms[fixed_layout.startRoom];
+		const dungeon::Room& fixed_goal_room = fixed_layout.rooms[1];
+		const std::vector<m8grid::Cell> fixed_path = m8grid::shortest_path(
+			fixed_config.width, fixed_config.height, fixed_walkable,
+			{ fixed_start_room.cx(), fixed_start_room.cy() },
+			{ fixed_goal_room.cx(), fixed_goal_room.cy() });
+		check(fixed_path.size() == 58,
+			"blocked Recast seed retains exact 58-cell deterministic grid route");
+		check(m8grid::path_hash(fixed_path) == 0x00daa157146cc810ULL,
+			"blocked Recast seed retains exact deterministic route hash");
 	}
 
 	check(m8objective::room_risk_priority(1) < m8objective::room_risk_priority(2)

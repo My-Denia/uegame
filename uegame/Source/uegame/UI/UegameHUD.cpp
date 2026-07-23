@@ -44,7 +44,7 @@ static TAutoConsoleVariable<float> CVarReadoutScale(
 
 static TAutoConsoleVariable<int32> CVarShowObjectiveRoute(
 	TEXT("ui.ShowObjectiveRoute"), 1,
-	TEXT("Capsule-agent NavMesh objective route: 1 = query/draw, 0 = zero route queries."),
+	TEXT("Objective route (Recast primary, verified grid fallback): 1 = query/draw, 0 = zero queries."),
 	ECVF_Default);
 
 // --- M7A.2 per-enemy readout (archetype nameplates + live HP bars) ---
@@ -133,6 +133,34 @@ namespace
 		}
 	}
 
+	const TCHAR* GridRouteResultName(EObjectiveGridRouteResult Result)
+	{
+		switch (Result)
+		{
+		case EObjectiveGridRouteResult::ReadyNext: return TEXT("GRID_READY_NEXT");
+		case EObjectiveGridRouteResult::ReadyRecenter: return TEXT("GRID_READY_RECENTER");
+		case EObjectiveGridRouteResult::ReadyTarget: return TEXT("GRID_READY_TARGET");
+		case EObjectiveGridRouteResult::IdentityUnavailable: return TEXT("GRID_IDENTITY_UNAVAILABLE");
+		case EObjectiveGridRouteResult::IdentityMismatch: return TEXT("GRID_IDENTITY_MISMATCH");
+		case EObjectiveGridRouteResult::InvalidEndpoint: return TEXT("GRID_INVALID_ENDPOINT");
+		case EObjectiveGridRouteResult::Unreachable: return TEXT("GRID_UNREACHABLE");
+		case EObjectiveGridRouteResult::LocalSegmentBlocked: return TEXT("GRID_LOCAL_SEGMENT_BLOCKED");
+		}
+		return TEXT("GRID_UNKNOWN");
+	}
+
+	const TCHAR* NavigationQueryFailureName(ENavigationQueryResult::Type Result)
+	{
+		switch (Result)
+		{
+		case ENavigationQueryResult::Invalid: return TEXT("NAV_QUERY_INVALID");
+		case ENavigationQueryResult::Error: return TEXT("NAV_QUERY_ERROR");
+		case ENavigationQueryResult::Fail: return TEXT("PATH_INVALID");
+		case ENavigationQueryResult::Success: return TEXT("SUCCESS_WITHOUT_VALID_PATH");
+		}
+		return TEXT("NAV_QUERY_UNKNOWN");
+	}
+
 	// Objective routing has stricter authority than the legacy readout: exactly one current
 	// encounter snapshot must match the active run and floor. Ambiguity clears the arrow.
 	ADungeonSpawner* FindFreshObjectiveSpawner(UWorld* World, const UUegameFloorManager* FM)
@@ -172,7 +200,12 @@ namespace
 			{ PlayerForward.X, PlayerForward.Y })));
 	}
 
-	bool TryMeasureReachablePath(UWorld* World, const APawn* Pawn, const FVector& Target, double& OutLength)
+	bool TryMeasureReachablePath(
+		UWorld* World,
+		const APawn* Pawn,
+		const ADungeonSpawner* Spawner,
+		const FVector& Target,
+		double& OutLength)
 	{
 		OutLength = 0.0;
 		if (!World || !Pawn)
@@ -201,7 +234,16 @@ namespace
 		FPathFindingQuery Query(Pawn, *NavData, Start.Location, End.Location);
 		Query.SetAllowPartialPaths(false);
 		const FPathFindingResult Result = NavSystem->FindPathSync(Query);
-		if (!Result.IsSuccessful() || !Result.Path.IsValid() || Result.IsPartial()
+		if (Result.Result == ENavigationQueryResult::Fail)
+		{
+			// Same natural PATH_INVALID seam as the player-facing cue. The grid method
+			// binds itself to the last-built geometry identity before returning a length.
+			return Spawner && Spawner->TryMeasureObjectiveGridPath(
+				Pawn->GetActorLocation(), Target, OutLength);
+		}
+		if (Result.Result != ENavigationQueryResult::Success
+			|| !Result.Path.IsValid()
+			|| Result.IsPartial()
 			|| Result.Path->GetPathPoints().Num() < 2)
 		{
 			return false;
@@ -257,7 +299,9 @@ namespace
 		{
 			return { { TEXT("OBJECTIVE: CHOOSE REWARD [1/2/3]"), kAccent } };
 		}
-		ADungeonSpawner* Spawner = AuthorityFaultMode >= 5 ? nullptr : FindFreshObjectiveSpawner(World, FM);
+		ADungeonSpawner* Spawner =
+			(AuthorityFaultMode == 5 || AuthorityFaultMode == 6)
+			? nullptr : FindFreshObjectiveSpawner(World, FM);
 		if (!Pawn || !Spawner)
 		{
 			return { { FM && FM->IsRunActive()
@@ -339,7 +383,8 @@ namespace
 				{
 					double PathLength = 0.0;
 					if (Spawner->GetAliveInRoom(Room) <= 0
-						|| !TryMeasureReachablePath(World, Pawn, Spawner->GetRoomCenterWorld(Room), PathLength))
+						|| !TryMeasureReachablePath(
+							World, Pawn, Spawner, Spawner->GetRoomCenterWorld(Room), PathLength))
 					{
 						continue;
 					}
@@ -528,6 +573,7 @@ void AUegameHUD::InvalidateObjectiveRoute()
 	ObjectiveRouteFloorIndex = INDEX_NONE;
 	ObjectiveRouteStatus = EObjectiveRouteStatus::None;
 	ObjectiveRouteLastResult = 0;
+	ObjectiveRouteSource = 0;
 }
 
 void AUegameHUD::InvalidateObjectiveTarget()
@@ -591,6 +637,7 @@ FString AUegameHUD::ResolveObjectiveRouteCue(
 		ObjectiveRouteWaypoint = FVector::ZeroVector;
 		ObjectiveRouteStatus = EObjectiveRouteStatus::None;
 		ObjectiveRouteLastResult = 0;
+		ObjectiveRouteSource = 0;
 		return TEXT("IN RANGE - ATTACK [F]");
 	}
 
@@ -637,9 +684,10 @@ FString AUegameHUD::ResolveObjectiveRouteCue(
 		ObjectiveRouteWaypoint = FVector::ZeroVector;
 		ObjectiveRouteStatus = EObjectiveRouteStatus::Blocked;
 		ObjectiveRouteLastResult = ResultCode;
+		ObjectiveRouteSource = 0;
 #if !UE_BUILD_SHIPPING
 		UE_LOG(LogTemp, Display,
-			TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=%s arrow=false stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) points=%d partial=%s durationMs=%.3f"),
+			TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=%s source=NONE arrow=false stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) points=%d partial=%s durationMs=%.3f"),
 			static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
 			static_cast<unsigned long long>(RunSeed), FloorIndex, Result,
 			NavData ? *NavData->GetName() : TEXT("NONE"),
@@ -691,16 +739,85 @@ FString AUegameHUD::ResolveObjectiveRouteCue(
 	FPathFindingQuery Query(Pawn, *NavData, ProjectedStart.Location, ProjectedEnd.Location);
 	Query.SetAllowPartialPaths(false);
 	FPathFindingResult PathResult = NavSystem->FindPathSync(Query);
-	bool bSuccessful = PathResult.IsSuccessful() && PathResult.Path.IsValid();
+	ENavigationQueryResult::Type QueryResult = PathResult.Result;
+	bool bForcedPathFailure = false;
+#if !UE_BUILD_SHIPPING
+	if (ObjectiveRouteFaultModeForTests == 3)
+	{
+		QueryResult = ENavigationQueryResult::Fail;
+		bForcedPathFailure = true;
+	}
+	if (ObjectiveRouteFaultModeForTests == 7)
+	{
+		QueryResult = ENavigationQueryResult::Invalid;
+	}
+	if (ObjectiveRouteFaultModeForTests == 8)
+	{
+		QueryResult = ENavigationQueryResult::Error;
+	}
+#endif
+	bool bSuccessful = QueryResult == ENavigationQueryResult::Success
+		&& PathResult.Path.IsValid();
 	bool bPartial = bSuccessful && PathResult.IsPartial();
 	int32 PointCount = bSuccessful ? PathResult.Path->GetPathPoints().Num() : 0;
 #if !UE_BUILD_SHIPPING
-	if (ObjectiveRouteFaultModeForTests == 3) { bSuccessful = false; PointCount = 0; }
 	if (ObjectiveRouteFaultModeForTests == 4) { bPartial = true; }
 #endif
 	if (!bSuccessful)
 	{
-		return FailRoute(TEXT("PATH_INVALID"), 4, NavData, AgentProps,
+		if (QueryResult == ENavigationQueryResult::Fail && !bForcedPathFailure)
+		{
+			ADungeonSpawner* Spawner = FindFreshObjectiveSpawner(
+				World, UUegameFloorManager::Get(World));
+			const FObjectiveGridRoute GridRoute = Spawner
+				? Spawner->ResolveObjectiveGridRoute(
+					Pawn->GetActorLocation(), TargetLocation, AgentProps.AgentRadius)
+				: FObjectiveGridRoute{};
+#if !UE_BUILD_SHIPPING
+			UE_LOG(LogTemp, Display,
+				TEXT("[ObjectiveGridRoute] serial=%llu result=%s builtHash=0x%llx pathCells=%d pawn=(%.1f,%.1f,%.1f) target=(%.1f,%.1f,%.1f) waypoint=(%.1f,%.1f,%.1f) radius=%.1f"),
+				static_cast<unsigned long long>(ObjectiveRouteQuerySerial),
+				GridRouteResultName(GridRoute.Result),
+				static_cast<unsigned long long>(GridRoute.BuiltPlanHash),
+				GridRoute.PathCellCount,
+				Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, Pawn->GetActorLocation().Z,
+				TargetLocation.X, TargetLocation.Y, TargetLocation.Z,
+				GridRoute.Waypoint.X, GridRoute.Waypoint.Y, GridRoute.Waypoint.Z,
+				FMath::Max(AgentProps.AgentRadius, 35.0f));
+#endif
+			if (GridRoute.IsReady())
+			{
+				ObjectiveRouteWaypoint = GridRoute.Waypoint;
+				ObjectiveRouteStatus = EObjectiveRouteStatus::Ready;
+				ObjectiveRouteLastResult = 8;
+				ObjectiveRouteSource = 2;
+				ObjectiveRouteLastQueryDurationMs =
+					(FPlatformTime::Seconds() - QueryStarted) * 1000.0;
+				const FString Direction = ObjectiveDirection(
+					ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController());
+#if !UE_BUILD_SHIPPING
+				UE_LOG(LogTemp, Display,
+					TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=GRID_READY source=GRID arrow=true stale=false builtHash=0x%llx pathCells=%d waypoint=(%.1f,%.1f,%.1f) direction=%s durationMs=%.3f"),
+					static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
+					static_cast<unsigned long long>(RunSeed), FloorIndex,
+					static_cast<unsigned long long>(GridRoute.BuiltPlanHash),
+					GridRoute.PathCellCount,
+					ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
+					*Direction, ObjectiveRouteLastQueryDurationMs);
+#endif
+				return FString::Printf(TEXT("ROUTE %s"), *Direction);
+			}
+			return FailRoute(
+				GridRouteResultName(GridRoute.Result),
+				static_cast<uint8>(9 + static_cast<uint8>(GridRoute.Result)),
+				NavData, AgentProps, ProjectedStart.Location, ProjectedEnd.Location,
+				GridRoute.PathCellCount, false, QueryStarted);
+		}
+		return FailRoute(
+			bForcedPathFailure ? TEXT("PATH_INVALID") : NavigationQueryFailureName(QueryResult),
+			QueryResult == ENavigationQueryResult::Invalid ? 17
+				: QueryResult == ENavigationQueryResult::Error ? 18 : 4,
+			NavData, AgentProps,
 			ProjectedStart.Location, ProjectedEnd.Location, PointCount, bPartial, QueryStarted);
 	}
 	if (bPartial)
@@ -728,13 +845,14 @@ FString AUegameHUD::ResolveObjectiveRouteCue(
 		? ProjectedEnd.Location : PathPoints[static_cast<int32>(Choice.path_index)].Location;
 	ObjectiveRouteStatus = EObjectiveRouteStatus::Ready;
 	ObjectiveRouteLastResult = 7;
+	ObjectiveRouteSource = 1;
 	ObjectiveRouteLastQueryDurationMs = (FPlatformTime::Seconds() - QueryStarted) * 1000.0;
 	const FString Direction = ObjectiveDirection(ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController());
 	const float ControlYaw = GetOwningPlayerController()
 		? GetOwningPlayerController()->GetControlRotation().Yaw : Pawn->GetActorRotation().Yaw;
 #if !UE_BUILD_SHIPPING
 	UE_LOG(LogTemp, Display,
-		TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=READY arrow=true stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) waypoint=(%.1f,%.1f,%.1f) controlYaw=%.1f points=%d partial=false fallback=%s direction=%s durationMs=%.3f"),
+		TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=READY source=RECAST arrow=true stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) waypoint=(%.1f,%.1f,%.1f) controlYaw=%.1f points=%d partial=false fallback=%s direction=%s durationMs=%.3f"),
 		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
 		static_cast<unsigned long long>(RunSeed), FloorIndex,
 		*NavData->GetName(), *NavData->GetClass()->GetName(), AgentProps.AgentRadius, AgentProps.AgentHeight,
@@ -751,7 +869,7 @@ FString AUegameHUD::ResolveObjectiveRouteCue(
 #if !UE_BUILD_SHIPPING
 void AUegameHUD::SetObjectiveRouteFaultModeForTests(int32 Mode)
 {
-	ObjectiveRouteFaultModeForTests = FMath::Clamp(Mode, 0, 6);
+	ObjectiveRouteFaultModeForTests = FMath::Clamp(Mode, 0, 8);
 	InvalidateObjectiveRoute();
 	bObjectiveRouteDeferQueryOnce = true;
 	UE_LOG(LogTemp, Display, TEXT("[ObjectiveRouteTest] faultMode=%d serial=%llu arrow=false"),
@@ -763,14 +881,16 @@ void AUegameHUD::LogObjectiveRouteStatusForTests() const
 	const TCHAR* Status = ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("READY")
 		: ObjectiveRouteStatus == EObjectiveRouteStatus::Blocked ? TEXT("BLOCKED")
 		: ObjectiveRouteStatus == EObjectiveRouteStatus::Updating ? TEXT("UPDATING") : TEXT("NONE");
+	const TCHAR* Source = ObjectiveRouteSource == 1 ? TEXT("RECAST")
+		: ObjectiveRouteSource == 2 ? TEXT("GRID") : TEXT("NONE");
 	const ADungeonEnemy* TargetEnemy = Cast<ADungeonEnemy>(ObjectiveTargetLock.Get());
 	const ADungeonSpawner* TargetSpawner = TargetEnemy ? TargetEnemy->GetOwningSpawner() : nullptr;
 	const TCHAR* TargetKind = TargetEnemy
 		? (TargetEnemy->IsWarden() ? TEXT("warden") : TEXT("ordinary"))
 		: (ObjectiveTargetLock.IsValid() ? TEXT("other") : TEXT("none"));
 	UE_LOG(LogTemp, Display,
-		TEXT("[ObjectiveRouteStatus] status=%s arrow=%s serial=%llu result=%u targetKey=%u pawnKey=%u runSeed=%llu floor=%d waypoint=(%.1f,%.1f,%.1f) faultMode=%d targetKind=%s targetRoom=%d ordinaryAlive=%d"),
-		Status, ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("true") : TEXT("false"),
+		TEXT("[ObjectiveRouteStatus] status=%s source=%s arrow=%s serial=%llu result=%u targetKey=%u pawnKey=%u runSeed=%llu floor=%d waypoint=(%.1f,%.1f,%.1f) faultMode=%d targetKind=%s targetRoom=%d ordinaryAlive=%d"),
+		Status, Source, ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("true") : TEXT("false"),
 		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), ObjectiveRouteLastResult,
 		ObjectiveRouteTargetKey, ObjectiveRoutePawnKey,
 		static_cast<unsigned long long>(ObjectiveRouteRunSeed), ObjectiveRouteFloorIndex,

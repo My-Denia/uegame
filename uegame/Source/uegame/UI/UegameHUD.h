@@ -74,6 +74,7 @@ private:
 	double ObjectiveRouteLastQueryDurationMs = 0.0;
 	uint64 ObjectiveRouteQuerySerial = 0;
 	uint8 ObjectiveRouteLastResult = 0;
+	uint8 ObjectiveRouteSource = 0; // 0=none, 1=Recast, 2=verified deterministic grid
 	bool bObjectiveRouteDeferQueryOnce = false;
 #if !UE_BUILD_SHIPPING
 	int32 ObjectiveRouteFaultModeForTests = 0;

@@ -15,11 +15,19 @@ struct Cell
 	int y = 0;
 };
 
-struct FeasibleWaypoint
+struct WaypointCandidates
 {
-	double x = 0.0;
-	double y = 0.0;
-	bool recenter = false;
+	Cell primary;
+	Cell fallback;
+	bool has_primary = false;
+	bool has_fallback = false;
+};
+
+enum class CandidateChoice : std::uint8_t
+{
+	Blocked = 0,
+	Primary = 1,
+	Fallback = 2
 };
 
 inline int index_of(int width, const Cell& cell)
@@ -32,39 +40,30 @@ inline bool valid_cell(int width, int height, const Cell& cell)
 	return cell.x >= 0 && cell.y >= 0 && cell.x < width && cell.y < height;
 }
 
-inline Cell nearest_walkable(
-	int width,
-	int height,
-	const std::vector<std::uint8_t>& walkable,
-	const Cell& requested)
+inline bool is_exact_positive_integer_step(double value)
 {
-	Cell best{ -1, -1 };
-	long long best_distance = std::numeric_limits<long long>::max();
-	int best_index = std::numeric_limits<int>::max();
-	for (int y = 0; y < height; ++y)
+	return std::isfinite(value)
+		&& value > 0.0
+		&& value <= static_cast<double>(std::numeric_limits<long long>::max())
+		&& std::floor(value) == value;
+}
+
+inline Cell world_to_cell(
+	double world_x,
+	double world_y,
+	double origin_x,
+	double origin_y,
+	double tile_size)
+{
+	if (!(tile_size > 0.0) || !std::isfinite(world_x) || !std::isfinite(world_y)
+		|| !std::isfinite(origin_x) || !std::isfinite(origin_y) || !std::isfinite(tile_size))
 	{
-		for (int x = 0; x < width; ++x)
-		{
-			const Cell candidate{ x, y };
-			const int candidate_index = index_of(width, candidate);
-			if (candidate_index < 0
-				|| static_cast<std::size_t>(candidate_index) >= walkable.size()
-				|| walkable[static_cast<std::size_t>(candidate_index)] == 0)
-			{
-				continue;
-			}
-			const long long dx = static_cast<long long>(x) - requested.x;
-			const long long dy = static_cast<long long>(y) - requested.y;
-			const long long distance = dx * dx + dy * dy;
-			if (distance < best_distance || (distance == best_distance && candidate_index < best_index))
-			{
-				best = candidate;
-				best_distance = distance;
-				best_index = candidate_index;
-			}
-		}
+		return { -1, -1 };
 	}
-	return best;
+	return {
+		static_cast<int>(std::floor((world_x - origin_x) / tile_size)),
+		static_cast<int>(std::floor((world_y - origin_y) / tile_size))
+	};
 }
 
 inline std::vector<Cell> shortest_path(
@@ -79,15 +78,21 @@ inline std::vector<Cell> shortest_path(
 	{
 		return {};
 	}
-	const Cell start = nearest_walkable(width, height, walkable, requested_start);
-	const Cell goal = nearest_walkable(width, height, walkable, requested_goal);
-	if (!valid_cell(width, height, start) || !valid_cell(width, height, goal))
+	if (!valid_cell(width, height, requested_start)
+		|| !valid_cell(width, height, requested_goal))
 	{
 		return {};
 	}
 
+	const Cell start = requested_start;
+	const Cell goal = requested_goal;
 	const int start_index = index_of(width, start);
 	const int goal_index = index_of(width, goal);
+	if (walkable[static_cast<std::size_t>(start_index)] == 0
+		|| walkable[static_cast<std::size_t>(goal_index)] == 0)
+	{
+		return {};
+	}
 	std::vector<int> predecessor(walkable.size(), -1);
 	std::vector<int> queue;
 	queue.reserve(walkable.size());
@@ -137,43 +142,57 @@ inline std::vector<Cell> shortest_path(
 	return std::vector<Cell>(reversed.rbegin(), reversed.rend());
 }
 
-// Convert the next four-neighbour BFS step into a capsule-friendly polyline waypoint.
-// A pawn near a side wall cannot safely cut diagonally toward the next cell centre: its
-// centre ray is clear while its collision radius clips the door corner. Use the fixed current
-// cell centre as a stable clearance waypoint before advancing. A moving projection can flip
-// sides while the player is still holding input and produce oscillating guidance.
-inline FeasibleWaypoint next_feasible_waypoint(
-	const std::vector<Cell>& path,
-	double start_grid_x,
-	double start_grid_y,
-	double centerline_tolerance_cells = 0.20)
+// The runtime checks both segments from the pawn's ACTUAL position. Trying the immediate
+// successor first avoids the oscillation caused by a tolerance-based "recentre whenever
+// off-axis" rule; the current cell centre is only a fallback when the successor sweep clips
+// a wall corner.
+inline WaypointCandidates ordered_waypoint_candidates(const std::vector<Cell>& path)
 {
 	if (path.empty())
 	{
 		return {};
 	}
-	const Cell& current = path[0];
-	const double current_center_x = static_cast<double>(current.x) + 0.5;
-	const double current_center_y = static_cast<double>(current.y) + 0.5;
 	if (path.size() == 1)
 	{
-		return { current_center_x, current_center_y, false };
+		return { path[0], {}, true, false };
 	}
-	const Cell& next = path[1];
-	if (next.x != current.x
-		&& std::abs(start_grid_y - current_center_y) > centerline_tolerance_cells)
+	return { path[1], path[0], true, true };
+}
+
+inline CandidateChoice choose_clear_candidate(
+	const WaypointCandidates& candidates,
+	bool primary_clear,
+	bool fallback_clear)
+{
+	if (candidates.has_primary && primary_clear)
 	{
-		return { current_center_x, current_center_y, true };
+		return CandidateChoice::Primary;
 	}
-	if (next.y != current.y
-		&& std::abs(start_grid_x - current_center_x) > centerline_tolerance_cells)
+	if (candidates.has_fallback && fallback_clear)
 	{
-		return { current_center_x, current_center_y, true };
+		return CandidateChoice::Fallback;
 	}
-	return {
-		static_cast<double>(next.x) + 0.5,
-		static_cast<double>(next.y) + 0.5,
-		false
+	return CandidateChoice::Blocked;
+}
+
+inline std::uint64_t path_hash(const std::vector<Cell>& path)
+{
+	std::uint64_t hash = 1469598103934665603ULL;
+	constexpr std::uint64_t prime = 1099511628211ULL;
+	auto mix_int = [&hash](int value)
+	{
+		const std::uint32_t bits = static_cast<std::uint32_t>(value);
+		for (int shift = 0; shift < 32; shift += 8)
+		{
+			hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffu);
+			hash *= prime;
+		}
 	};
+	for (const Cell& cell : path)
+	{
+		mix_int(cell.x);
+		mix_int(cell.y);
+	}
+	return hash;
 }
 }

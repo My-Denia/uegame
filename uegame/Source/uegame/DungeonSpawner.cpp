@@ -8,6 +8,8 @@
 #include "DungeonSpawner.h"
 
 #include "AI/Navigation/NavigationDirtyArea.h"
+#include "CollisionQueryParams.h"
+#include "CollisionShape.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
 #include "Combat/DungeonStairs.h"
@@ -31,6 +33,7 @@
 // std/algorithm types stay out of UHT's view and unity builds cannot leak them around.
 #include "m2_adapter.hpp"
 #include "m8_finale.hpp"
+#include "m8_grid_route.hpp"
 
 ADungeonSpawner::ADungeonSpawner()
 {
@@ -778,6 +781,11 @@ FChallengeContractTransactionResult ADungeonSpawner::ApplyChallengeContractTrans
 
 void ADungeonSpawner::Build()
 {
+	bHasBuiltLayoutIdentity = false;
+	BuiltSeed64 = 0;
+	BuiltTileSize = 0.0f;
+	BuiltWallHeight = 0.0f;
+	BuiltSpawnPlanHash = 0;
 	if (!FloorISM || !WallISM || !CorridorISM || !DoorISM)
 	{
 		return;
@@ -852,6 +860,7 @@ void ADungeonSpawner::Build()
 
 	// --- Fidelity log (the programmatic half of acceptance #2) ---
 	const m2::WorldReach WR = m2::worldReachability(Layout, WC);
+	const uint64 BuiltHash = m2::spawnPlanHash(Layout, WC);
 	const int32 SpawnedWalkable =
 		FloorISM->GetInstanceCount() + CorridorISM->GetInstanceCount() + DoorISM->GetInstanceCount();
 	const int32 SpawnedTotal = SpawnedWalkable + WallISM->GetInstanceCount();
@@ -867,7 +876,197 @@ void ADungeonSpawner::Build()
 		WR.reached, WR.passable,
 		WR.roomsReached, WR.rooms,
 		WR.fullyConnected() ? TEXT("YES") : TEXT("NO"),
-		static_cast<unsigned long long>(m2::spawnPlanHash(Layout, WC)));
+		static_cast<unsigned long long>(BuiltHash));
+
+	// Publish only after every geometry instance and fidelity check above completed. Route
+	// fallback regenerates from these values and rejects any later property/seed drift.
+	if (!m8grid::is_exact_positive_integer_step(TileSize))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ObjectiveGridRoute] built identity withheld: TileSize %.6f is not an exact positive integer world step"),
+			TileSize);
+		return;
+	}
+	BuiltSeed64 = GetEffectiveSeed64();
+	BuiltTileSize = static_cast<float>(WC.tileSize);
+	BuiltWallHeight = WallHeight;
+	BuiltSpawnPlanHash = BuiltHash;
+	bHasBuiltLayoutIdentity = true;
+}
+
+FObjectiveGridRoute ADungeonSpawner::ResolveObjectiveGridRoute(
+	const FVector& PawnLocation,
+	const FVector& TargetLocation,
+	float AgentRadius) const
+{
+	FObjectiveGridRoute Result;
+	Result.BuiltPlanHash = BuiltSpawnPlanHash;
+	if (!bHasBuiltLayoutIdentity)
+	{
+		return Result;
+	}
+	if (GetEffectiveSeed64() != BuiltSeed64
+		|| !FMath::IsNearlyEqual(TileSize, BuiltTileSize)
+		|| !FMath::IsNearlyEqual(WallHeight, BuiltWallHeight))
+	{
+		Result.Result = EObjectiveGridRouteResult::IdentityMismatch;
+		return Result;
+	}
+
+	dungeon::Config Cfg;
+	Cfg.seed = BuiltSeed64;
+	const dungeon::Layout Layout = dungeon::generate(Cfg);
+	m2::WorldConfig WC;
+	WC.tileSize = static_cast<long long>(BuiltTileSize);
+	WC.wallHeight = static_cast<long long>(BuiltWallHeight);
+	if (m2::spawnPlanHash(Layout, WC) != BuiltSpawnPlanHash)
+	{
+		Result.Result = EObjectiveGridRouteResult::IdentityMismatch;
+		return Result;
+	}
+
+	std::vector<std::uint8_t> Walkable;
+	Walkable.reserve(Layout.grid.size());
+	for (const dungeon::Tile Tile : Layout.grid)
+	{
+		Walkable.push_back(dungeon::isPassable(Tile) ? 1u : 0u);
+	}
+	const m8grid::Cell Start = m8grid::world_to_cell(
+		PawnLocation.X, PawnLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	const m8grid::Cell Goal = m8grid::world_to_cell(
+		TargetLocation.X, TargetLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	if (!m8grid::valid_cell(Cfg.width, Cfg.height, Start)
+		|| !m8grid::valid_cell(Cfg.width, Cfg.height, Goal)
+		|| !dungeon::isPassable(Layout.at(Start.x, Start.y))
+		|| !dungeon::isPassable(Layout.at(Goal.x, Goal.y)))
+	{
+		Result.Result = EObjectiveGridRouteResult::InvalidEndpoint;
+		return Result;
+	}
+
+	const std::vector<m8grid::Cell> Path = m8grid::shortest_path(
+		Cfg.width, Cfg.height, Walkable, Start, Goal);
+	Result.PathCellCount = static_cast<int32>(Path.size());
+	if (Path.empty())
+	{
+		Result.Result = EObjectiveGridRouteResult::Unreachable;
+		return Result;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		Result.Result = EObjectiveGridRouteResult::LocalSegmentBlocked;
+		return Result;
+	}
+	const float ClearanceRadius = FMath::Max(AgentRadius, 35.0f);
+	const float SweepZ = FMath::Max(PawnLocation.Z, BuiltWallHeight * 0.5f);
+	const FVector SweepStart(PawnLocation.X, PawnLocation.Y, SweepZ);
+	auto CellCenter = [this, SweepZ](const m8grid::Cell& Cell)
+	{
+		return FVector(
+			(static_cast<float>(Cell.x) + 0.5f) * BuiltTileSize,
+			(static_cast<float>(Cell.y) + 0.5f) * BuiltTileSize,
+			SweepZ);
+	};
+	auto SegmentClear = [World, SweepStart, ClearanceRadius](const FVector& Candidate)
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(ObjectiveGridRoute), false);
+		const FVector SweepEnd(Candidate.X, Candidate.Y, SweepStart.Z);
+		return !World->SweepTestByObjectType(
+			SweepStart, SweepEnd, FQuat::Identity,
+			FCollisionObjectQueryParams(ECC_WorldStatic),
+			FCollisionShape::MakeSphere(ClearanceRadius), Params);
+	};
+
+	if (Path.size() == 1)
+	{
+		const FVector TargetCandidate(TargetLocation.X, TargetLocation.Y, SweepZ);
+		if (SegmentClear(TargetCandidate))
+		{
+			Result.Result = EObjectiveGridRouteResult::ReadyTarget;
+			Result.Waypoint = TargetCandidate;
+			return Result;
+		}
+		const FVector CurrentCenter = CellCenter(Path[0]);
+		if (SegmentClear(CurrentCenter))
+		{
+			Result.Result = EObjectiveGridRouteResult::ReadyRecenter;
+			Result.Waypoint = CurrentCenter;
+			return Result;
+		}
+		Result.Result = EObjectiveGridRouteResult::LocalSegmentBlocked;
+		return Result;
+	}
+
+	const m8grid::WaypointCandidates Candidates =
+		m8grid::ordered_waypoint_candidates(Path);
+	const FVector Primary = CellCenter(Candidates.primary);
+	const bool bPrimaryClear = SegmentClear(Primary);
+	FVector Fallback = FVector::ZeroVector;
+	bool bFallbackClear = false;
+	if (!bPrimaryClear && Candidates.has_fallback)
+	{
+		Fallback = CellCenter(Candidates.fallback);
+		bFallbackClear = SegmentClear(Fallback);
+	}
+	switch (m8grid::choose_clear_candidate(Candidates, bPrimaryClear, bFallbackClear))
+	{
+	case m8grid::CandidateChoice::Primary:
+		Result.Result = EObjectiveGridRouteResult::ReadyNext;
+		Result.Waypoint = Primary;
+		return Result;
+	case m8grid::CandidateChoice::Fallback:
+		Result.Result = EObjectiveGridRouteResult::ReadyRecenter;
+		Result.Waypoint = Fallback;
+		return Result;
+	case m8grid::CandidateChoice::Blocked:
+	default:
+		Result.Result = EObjectiveGridRouteResult::LocalSegmentBlocked;
+		return Result;
+	}
+}
+
+bool ADungeonSpawner::TryMeasureObjectiveGridPath(
+	const FVector& StartLocation,
+	const FVector& TargetLocation,
+	double& OutLength) const
+{
+	OutLength = 0.0;
+	if (!bHasBuiltLayoutIdentity || GetEffectiveSeed64() != BuiltSeed64
+		|| !FMath::IsNearlyEqual(TileSize, BuiltTileSize)
+		|| !FMath::IsNearlyEqual(WallHeight, BuiltWallHeight))
+	{
+		return false;
+	}
+	dungeon::Config Cfg;
+	Cfg.seed = BuiltSeed64;
+	const dungeon::Layout Layout = dungeon::generate(Cfg);
+	m2::WorldConfig WC;
+	WC.tileSize = static_cast<long long>(BuiltTileSize);
+	WC.wallHeight = static_cast<long long>(BuiltWallHeight);
+	if (m2::spawnPlanHash(Layout, WC) != BuiltSpawnPlanHash)
+	{
+		return false;
+	}
+	std::vector<std::uint8_t> Walkable;
+	Walkable.reserve(Layout.grid.size());
+	for (const dungeon::Tile Tile : Layout.grid)
+	{
+		Walkable.push_back(dungeon::isPassable(Tile) ? 1u : 0u);
+	}
+	const m8grid::Cell Start = m8grid::world_to_cell(
+		StartLocation.X, StartLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	const m8grid::Cell Goal = m8grid::world_to_cell(
+		TargetLocation.X, TargetLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	const std::vector<m8grid::Cell> Path = m8grid::shortest_path(
+		Cfg.width, Cfg.height, Walkable, Start, Goal);
+	if (Path.empty())
+	{
+		return false;
+	}
+	OutLength = static_cast<double>(Path.size() - 1) * BuiltTileSize;
+	return FMath::IsFinite(OutLength);
 }
 
 void ADungeonSpawner::SpawnNavBounds()

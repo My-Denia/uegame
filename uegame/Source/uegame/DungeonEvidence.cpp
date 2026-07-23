@@ -1692,10 +1692,10 @@ void DungeonRouteFaultModeCmd(const TArray<FString>& Args, UWorld* World)
 	AUegameHUD* HUD = PC ? Cast<AUegameHUD>(PC->GetHUD()) : nullptr;
 	if (!HUD || Args.Num() != 1)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.RouteFaultMode <0..6>"));
+		UE_LOG(LogTemp, Error, TEXT("[DungeonEvidence] usage: Dungeon.RouteFaultMode <0..8>"));
 		return;
 	}
-	HUD->SetObjectiveRouteFaultModeForTests(FMath::Clamp(FCString::Atoi(*Args[0]), 0, 6));
+	HUD->SetObjectiveRouteFaultModeForTests(FMath::Clamp(FCString::Atoi(*Args[0]), 0, 8));
 }
 
 void DungeonRouteStatusCmd(const TArray<FString>& /*Args*/, UWorld* World)
