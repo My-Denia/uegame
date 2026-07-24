@@ -1257,7 +1257,17 @@ void AUegameHUD::DrawHUD()
 	bool bDimSceneForModal = false;
 	bool bTitlePresentation = false;
 	bool bConfirmationPresentation = false;
-	if (ProductPC && ProductPC->IsWelcomeVisible())
+	// Confirmation must win over the title card: Enter/Space confirm the modal, and
+	// drawing BEGIN underneath would make an open quit/restart dialog look like a start prompt.
+	if (ProductPC && ProductPC->IsConfirmationVisible())
+	{
+		bDimSceneForModal = true;
+		bConfirmationPresentation = true;
+		Center.Add({ ProductPC->GetConfirmationTitle(), kAccent });
+		Center.Add({ ProductPC->GetConfirmationAction(), kBody });
+		Center.Add({ TEXT("ESC   CANCEL"), kDim });
+	}
+	else if (ProductPC && ProductPC->IsWelcomeVisible())
 	{
 		bDimSceneForModal = true;
 		bTitlePresentation = true;
@@ -1266,14 +1276,6 @@ void AUegameHUD::DrawHUD()
 		Center.Add({ TEXT("ENTER / SPACE   BEGIN"), kBody });
 		Center.Add({ TEXT("WASD Move   Mouse Look   F Attack"), kDim });
 		Center.Add({ TEXT("Q   Quit to Desktop"), kDim });
-	}
-	else if (ProductPC && ProductPC->IsConfirmationVisible())
-	{
-		bDimSceneForModal = true;
-		bConfirmationPresentation = true;
-		Center.Add({ ProductPC->GetConfirmationTitle(), kAccent });
-		Center.Add({ ProductPC->GetConfirmationAction(), kBody });
-		Center.Add({ TEXT("ESC   CANCEL"), kDim });
 	}
 	else if (FM && FM->IsRunActive())
 	{
