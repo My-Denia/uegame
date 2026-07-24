@@ -15,6 +15,77 @@
 #include "DungeonSpawner.generated.h"
 
 class UInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
+class ADungeonEnemy;
+struct FCombatConfigRow;
+
+enum class EUegameFinaleInitState : uint8
+{
+	NotRequired = 0,
+	Pending,
+	Succeeded,
+	Failed
+};
+
+struct FFloorExitNeutralizationResult
+{
+	int32 ExpectedActive = 0;
+	int32 Collected = 0;
+	int32 Preflighted = 0;
+	int32 Neutralized = 0;
+	int32 DestroyQueued = 0;
+	int32 RemainingActive = 0;
+	int32 ResidualPrepared = 0;
+	bool bCollectionPassed = false;
+	bool bPreflightPassed = false;
+	bool bSuccess = false;
+	TArray<int64> CollectedIds;
+};
+
+struct FChallengeContractTransactionResult
+{
+	int32 Expected = 0;
+	int32 ObservedActive = 0;
+	int32 Eligible = 0;
+	int32 Applied = 0;
+	int32 RolledBack = 0;
+	int32 ResidualModified = 0;
+	bool bPreflightPassed = false;
+	bool bCommitted = false;
+	bool bRollbackComplete = true;
+	bool bTargetCurrent = true;
+	TArray<int64> ExpectedIds;
+	TArray<int64> EligibleIds;
+	TArray<int64> AppliedIds;
+	TArray<int64> RolledBackIds;
+};
+
+enum class EObjectiveGridRouteResult : uint8
+{
+	ReadyNext,
+	ReadyRecenter,
+	ReadyTarget,
+	IdentityUnavailable,
+	IdentityMismatch,
+	InvalidEndpoint,
+	Unreachable,
+	LocalSegmentBlocked
+};
+
+struct FObjectiveGridRoute
+{
+	EObjectiveGridRouteResult Result = EObjectiveGridRouteResult::IdentityUnavailable;
+	FVector Waypoint = FVector::ZeroVector;
+	int32 PathCellCount = 0;
+	uint64 BuiltPlanHash = 0;
+
+	bool IsReady() const
+	{
+		return Result == EObjectiveGridRouteResult::ReadyNext
+			|| Result == EObjectiveGridRouteResult::ReadyRecenter
+			|| Result == EObjectiveGridRouteResult::ReadyTarget;
+	}
+};
 
 UCLASS()
 class UEGAME_API ADungeonSpawner : public AActor
@@ -76,11 +147,15 @@ public:
 	void SetSeed64(uint64 InSeed) { Seed64 = InSeed; bHasSeed64 = true; }
 
 	/** In-place floor transition: despawn all enemies, rebuild geometry from NewSeed,
-	 *  re-dirty the navmesh over the whole map, respawn enemies (scaled), teleport the
-	 *  player to the new start room. World and nav system stay alive (no OpenLevel -
-	 *  that path loses the RecastNavMesh, M3 finding). */
-	void RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride = -1,
-	                     float InEnemyHPOverride = -1.0f);
+	 *  re-dirty the navmesh over the whole map, respawn enemies (scaled), optionally
+	 *  commit the final-floor Warden before returning, then teleport the player to the
+	 *  new start room. World and nav system stay alive (no OpenLevel - that path loses
+	 *  the RecastNavMesh, M3 finding). False means the requested finale transaction
+	 *  failed closed; ordinary floors return true after regeneration. */
+	bool RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride = -1,
+	                     float InEnemyHPOverride = -1.0f,
+	                     const FCombatConfigRow* FinaleConfig = nullptr,
+	                     int32 ResolveTokens = 0);
 
 	/** Absolute world position of the start room center (valid after Build). */
 	FVector GetStartWorldLocation() const { return StartWorld; }
@@ -92,7 +167,46 @@ public:
 	// --- M3 room-clear tracking (evidence surface) ---
 
 	/** Enemy death callback; logs [RoomClear] when a room's alive count reaches zero. */
-	void NotifyEnemyDead(int32 InRoomIndex);
+	void NotifyEnemyDead(ADungeonEnemy* Enemy);
+
+	/** Promote one frozen final-floor spawn to a fixed-profile Warden without changing identity. */
+	bool InitializeFinale(const FCombatConfigRow& Row, int32 ResolveTokens);
+	EUegameFinaleInitState GetFinaleInitState() const { return FinaleInitState; }
+	bool HasFinaleInitialized() const { return FinaleInitState == EUegameFinaleInitState::Succeeded; }
+	bool HasFinaleFailed() const { return FinaleInitState == EUegameFinaleInitState::Failed; }
+	bool IsWardenDefeated() const { return bWardenDefeated; }
+	ADungeonEnemy* GetWarden() const { return WardenEnemy.Get(); }
+	int32 GetLivingOrdinaryEnemyCount() const;
+
+	/** Atomically make every live enemy owned by this spawner harmless before progression. */
+	FFloorExitNeutralizationResult DeactivateRemainingEnemiesForExit(int32 InFloorIndex);
+	/** Preflight the full live room set, then apply all-or-rollback Challenge modifiers. */
+	FChallengeContractTransactionResult ApplyChallengeContractTransactional(int32 InRoomIndex);
+#if !UE_BUILD_SHIPPING
+	/** Pre-mutation negative seam: 0=off, 1=fail after collection, 2=fail after preflight. */
+	void SetExitWithdrawalFailureModeForTests(int32 Mode)
+	{
+		ExitWithdrawalFailureModeForTests = FMath::Clamp(Mode, 0, 2);
+	}
+	/** 0=none, 1=stale preflight, 2=partial apply followed by required rollback. */
+	void SetChallengeContractFailureModeForTests(int32 Mode) { ChallengeContractFailureModeForTests = Mode; }
+	/** One-shot finale init seam: 1=missing, 2=duplicate, 3=mismatch,
+	 *  4=partial rollback, 5=invalid profile, 6=destroyed/stale candidate. */
+	void SetFinaleInitFailureModeForTests(int32 Mode)
+	{
+		FinaleInitFailureModeForTests = FMath::Clamp(Mode, 0, 6);
+	}
+	/** Evidence-only cache staging for isolated callback validation; caller must restore it. */
+	bool SetRoomAliveCountForTests(int32 RoomIndex, int32 Alive)
+	{
+		if (!RoomAliveCounts.IsValidIndex(RoomIndex))
+		{
+			return false;
+		}
+		RoomAliveCounts[RoomIndex] = FMath::Clamp(Alive, 0, RoomInitialCounts[RoomIndex]);
+		return true;
+	}
+#endif
 
 	int32 GetRoomCount() const { return RoomCentersWorld.Num(); }
 	FVector GetRoomCenterWorld(int32 InRoomIndex) const
@@ -106,6 +220,24 @@ public:
 	int32 GetInitialInRoom(int32 InRoomIndex) const
 	{
 		return RoomInitialCounts.IsValidIndex(InRoomIndex) ? RoomInitialCounts[InRoomIndex] : 0;
+	}
+	int32 GetActualEnemyRoomCount() const
+	{
+		int32 Count = 0;
+		for (const int32 Initial : RoomInitialCounts)
+		{
+			Count += Initial > 0 ? 1 : 0;
+		}
+		return Count;
+	}
+	int32 GetTotalAliveEnemies() const
+	{
+		int32 Count = 0;
+		for (const int32 Alive : RoomAliveCounts)
+		{
+			Count += FMath::Max(0, Alive);
+		}
+		return Count;
 	}
 	int32 GetStartRoomIndex() const { return StartRoomIndex; }
 
@@ -122,6 +254,20 @@ public:
 	/** m2 anchors for the same plan, cached at spawn time (baseline-unchanged evidence). */
 	uint64 GetCachedSpawnPlanHash() const { return CachedSpawnPlanHash; }
 	uint64 GetCachedEnemyPlanHash() const { return CachedEnemyPlanHash; }
+	/** Presentation route identity published only after Build() completes successfully. */
+	bool HasBuiltLayoutIdentity() const { return bHasBuiltLayoutIdentity; }
+	uint64 GetBuiltSpawnPlanHash() const { return BuiltSpawnPlanHash; }
+	/** Recast-independent shortest-grid fallback over the exact last-built layout identity.
+	 *  It returns only an immediate locally swept waypoint and never moves gameplay actors. */
+	FObjectiveGridRoute ResolveObjectiveGridRoute(
+		const FVector& PawnLocation,
+		const FVector& TargetLocation,
+		float AgentRadius) const;
+	/** Same identity/topology proof without a local sweep, used only to rank objective rooms. */
+	bool TryMeasureObjectiveGridPath(
+		const FVector& StartLocation,
+		const FVector& TargetLocation,
+		double& OutLength) const;
 	/** One m6::RoleId-as-int per room index. */
 	const TArray<int32>& GetCachedRoomRoles() const { return CachedRoomRoles; }
 	/** Per-room spawned archetype counts (X=Grunt, Y=Runner, Z=Brute). */
@@ -152,10 +298,18 @@ private:
 	/** Mark the whole map dirty so the dynamic navmesh rebuilds (M2 pattern, factored
 	 *  out so floor transitions can reuse it). */
 	void RefreshNavigation();
+	void ResetFinaleState();
+	/** Presentation-only material palette; instance transforms and deterministic plan stay untouched. */
+	void ApplyPresentationTheme();
 
 	/** M4: 64-bit runtime seed (floor seeds exceed int32). */
 	uint64 Seed64 = 0;
 	bool bHasSeed64 = false;
+	bool bHasBuiltLayoutIdentity = false;
+	uint64 BuiltSeed64 = 0;
+	float BuiltTileSize = 0.0f;
+	float BuiltWallHeight = 0.0f;
+	uint64 BuiltSpawnPlanHash = 0;
 
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<USceneComponent> Root;
@@ -172,6 +326,15 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="Dungeon")
 	TObjectPtr<UInstancedStaticMeshComponent> DoorISM;
 
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> FloorMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WallMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> CorridorMID;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> DoorMID;
+
 	/** Absolute world position of the start room center; written by Build(). */
 	FVector StartWorld = FVector::ZeroVector;
 
@@ -186,6 +349,12 @@ private:
 	/** M3 per-room enemy bookkeeping; written by SpawnEnemies(). */
 	TArray<int32> RoomAliveCounts;
 	TArray<int32> RoomInitialCounts;
+	TArray<TWeakObjectPtr<ADungeonEnemy>> SpawnedEnemyActors;
+	TArray<int32> LastPlannedRooms;
+	int32 LastPlannedEnemyCount = 0;
+	EUegameFinaleInitState FinaleInitState = EUegameFinaleInitState::NotRequired;
+	TWeakObjectPtr<ADungeonEnemy> WardenEnemy;
+	bool bWardenDefeated = false;
 
 	// --- M6B encounter cache backing fields (see public accessors above) ---
 	bool bEncounterAssigned = false;
@@ -199,4 +368,9 @@ private:
 	TArray<int32> CachedRoomRoles;
 	TArray<FIntVector> CachedRoomTypeCounts;
 	FIntVector CachedTypeTally = FIntVector::ZeroValue;
+#if !UE_BUILD_SHIPPING
+	int32 ExitWithdrawalFailureModeForTests = 0;
+	int32 ChallengeContractFailureModeForTests = 0;
+	int32 FinaleInitFailureModeForTests = 0;
+#endif
 };

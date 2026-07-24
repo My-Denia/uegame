@@ -8,6 +8,9 @@
 #include "DungeonSpawner.h"
 
 #include "AI/Navigation/NavigationDirtyArea.h"
+#include "Camera/PlayerCameraManager.h"
+#include "CollisionQueryParams.h"
+#include "CollisionShape.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/DungeonEnemy.h"
 #include "Combat/DungeonStairs.h"
@@ -20,7 +23,11 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationSystem.h"
 #include "TimerManager.h"
@@ -30,6 +37,35 @@
 // uegame.Build.cs. Included ONLY in this .cpp - never in a reflected UE header - so
 // std/algorithm types stay out of UHT's view and unity builds cannot leak them around.
 #include "m2_adapter.hpp"
+#include "m8_finale.hpp"
+#include "m8_grid_route.hpp"
+
+namespace
+{
+void RefreshPlayerCameraAfterFloorTeleport(APawn* Pawn)
+{
+	if (!Pawn)
+	{
+		return;
+	}
+
+	// A room contract hard-pauses the world in the same frame as floor regeneration.
+	// Refresh the camera explicitly so it cannot retain the prior floor's view while
+	// paused (which can leave a restart contract screen looking completely black).
+	Pawn->UpdateComponentTransforms();
+	if (USpringArmComponent* CameraBoom = Pawn->FindComponentByClass<USpringArmComponent>())
+	{
+		CameraBoom->TickComponent(0.0f, LEVELTICK_All, nullptr);
+	}
+	if (APlayerController* PC = Cast<APlayerController>(Pawn->GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->UpdateCamera(0.0f);
+		}
+	}
+}
+}
 
 ADungeonSpawner::ADungeonSpawner()
 {
@@ -42,8 +78,11 @@ ADungeonSpawner::ADungeonSpawner()
 	// CDO construction; no static-in-lambda).
 	ConstructorHelpers::FObjectFinder<UStaticMesh> CubeFinder(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UStaticMesh* CubeMesh = CubeFinder.Succeeded() ? CubeFinder.Object : nullptr;
+	ConstructorHelpers::FObjectFinder<UMaterialInterface> MaterialFinder(
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	UMaterialInterface* ShapeMaterial = MaterialFinder.Succeeded() ? MaterialFinder.Object : nullptr;
 
-	auto MakeISM = [this, CubeMesh](const TCHAR* Name) -> UInstancedStaticMeshComponent*
+	auto MakeISM = [this, CubeMesh, ShapeMaterial](const TCHAR* Name) -> UInstancedStaticMeshComponent*
 	{
 		UInstancedStaticMeshComponent* Ism = CreateDefaultSubobject<UInstancedStaticMeshComponent>(Name);
 		Ism->SetupAttachment(Root);
@@ -53,6 +92,10 @@ ADungeonSpawner::ADungeonSpawner()
 		if (CubeMesh)
 		{
 			Ism->SetStaticMesh(CubeMesh);
+		}
+		if (ShapeMaterial)
+		{
+			Ism->SetMaterial(0, ShapeMaterial);
 		}
 		return Ism;
 	};
@@ -81,6 +124,7 @@ void ADungeonSpawner::BeginPlay()
 	{
 		Build();
 	}
+	ApplyPresentationTheme();
 
 	if (bSpawnNavBounds)
 	{
@@ -177,6 +221,14 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 	WC.wallHeight = static_cast<long long>(WallHeight);
 	const std::vector<m2::EnemyPlacement> Plan =
 		m2::buildEnemyPlan(Layout, WC, EffPerRoom, Layout.startRoom);
+	SpawnedEnemyActors.Reset();
+	LastPlannedRooms.Reset();
+	LastPlannedEnemyCount = static_cast<int32>(Plan.size());
+	LastPlannedRooms.Reserve(LastPlannedEnemyCount);
+	for (const m2::EnemyPlacement& Placement : Plan)
+	{
+		LastPlannedRooms.Add(Placement.roomIndex);
+	}
 
 	RoomAliveCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
 	RoomInitialCounts.Init(0, static_cast<int32>(Layout.rooms.size()));
@@ -248,6 +300,8 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 			continue;
 		}
 		Enemy->InitEnemy(EffCfg, P.roomIndex, this);
+		// Additive runtime ordering only; the frozen plan count/order/placement is unchanged.
+		Enemy->SetSpawnOrdinal(PlanIdx);
 		if (bEncounterAssigned && EnemyTypes.IsValidIndex(PlanIdx))
 		{
 			const int32 T = EnemyTypes[PlanIdx];
@@ -260,6 +314,7 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 			SpawnedTypes.Add(T);
 		}
 		Enemy->FinishSpawning(FTransform(Loc));
+		SpawnedEnemyActors.Add(Enemy);
 		++RoomAliveCounts[P.roomIndex];
 		++RoomInitialCounts[P.roomIndex];
 		++Spawned;
@@ -325,51 +380,452 @@ void ADungeonSpawner::SpawnEnemies(int32 InEnemiesPerRoomOverride, float InEnemy
 	}
 }
 
-void ADungeonSpawner::NotifyEnemyDead(int32 InRoomIndex)
+void ADungeonSpawner::ResetFinaleState()
 {
+	WardenEnemy.Reset();
+	bWardenDefeated = false;
+	FinaleInitState = EUegameFinaleInitState::NotRequired;
+}
+
+int32 ADungeonSpawner::GetLivingOrdinaryEnemyCount() const
+{
+	int32 Count = 0;
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : SpawnedEnemyActors)
+	{
+		const ADungeonEnemy* Enemy = WeakEnemy.Get();
+		if (Enemy && Enemy->IsActiveThreat() && !Enemy->IsWarden())
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+bool ADungeonSpawner::InitializeFinale(const FCombatConfigRow& Row, int32 ResolveTokens)
+{
+	WardenEnemy.Reset();
+	bWardenDefeated = false;
+	FinaleInitState = EUegameFinaleInitState::Pending;
+	int32 FailureMode = 0;
+#if !UE_BUILD_SHIPPING
+	FailureMode = FinaleInitFailureModeForTests;
+	FinaleInitFailureModeForTests = 0;
+#endif
+
+	std::vector<m8finale::Candidate> Candidates;
+	TArray<ADungeonEnemy*> CandidateActors;
+	Candidates.reserve(static_cast<size_t>(SpawnedEnemyActors.Num()));
+	CandidateActors.Reserve(SpawnedEnemyActors.Num());
+	TSet<const ADungeonEnemy*> UniqueActors;
+	if (FailureMode == 6 && !SpawnedEnemyActors.IsEmpty())
+	{
+		// Destroyed actors remain in the weak candidate snapshot until cleanup. The production
+		// preflight must reject that stale identity rather than silently selecting another spawn.
+		if (ADungeonEnemy* StaleCandidate = SpawnedEnemyActors[0].Get())
+		{
+			StaleCandidate->Destroy();
+		}
+	}
+	bool bRuntimePreflight = LastPlannedEnemyCount > 0
+		&& SpawnedEnemyActors.Num() == LastPlannedEnemyCount
+		&& LastPlannedRooms.Num() == LastPlannedEnemyCount;
+	for (int32 Index = 0; bRuntimePreflight && Index < SpawnedEnemyActors.Num(); ++Index)
+	{
+		ADungeonEnemy* Enemy = SpawnedEnemyActors[Index].Get();
+		if (!IsValid(Enemy) || Enemy->IsActorBeingDestroyed() || !Enemy->IsActiveThreat()
+			|| Enemy->GetOwningSpawner() != this || UniqueActors.Contains(Enemy)
+			|| Enemy->GetSpawnOrdinal() != Index
+			|| !LastPlannedRooms.IsValidIndex(Index)
+			|| Enemy->GetRoomIndex() != LastPlannedRooms[Index]
+			|| Enemy->GetRoomIndex() == StartRoomIndex)
+		{
+			bRuntimePreflight = false;
+			break;
+		}
+		UniqueActors.Add(Enemy);
+		m8finale::Candidate Candidate;
+		Candidate.room_index = Enemy->GetRoomIndex();
+		Candidate.spawn_ordinal = static_cast<uint32>(Enemy->GetSpawnOrdinal());
+		Candidate.spawned = true;
+		Candidate.start_room = false;
+		Candidates.push_back(Candidate);
+		CandidateActors.Add(Enemy);
+	}
+
+	if (FailureMode == 1 && !Candidates.empty())
+	{
+		Candidates.pop_back();
+		CandidateActors.Pop();
+	}
+	else if (FailureMode == 2 && Candidates.size() > 1)
+	{
+		Candidates[1].spawn_ordinal = Candidates[0].spawn_ordinal;
+	}
+	else if (FailureMode == 3 && !Candidates.empty())
+	{
+		Candidates[0].room_index = RoomCentersWorld.Num();
+	}
+
+	const bool bCandidatesValid = bRuntimePreflight
+		&& m8finale::validate_candidates(
+			Candidates, static_cast<size_t>(LastPlannedEnemyCount), RoomCentersWorld.Num());
+	const size_t SelectedIndex = bCandidatesValid
+		? m8finale::select_warden(Candidates, FarthestRoomIndex)
+		: static_cast<size_t>(-1);
+	if (SelectedIndex >= static_cast<size_t>(CandidateActors.Num()))
+	{
+		FinaleInitState = EUegameFinaleInitState::Failed;
+		UE_LOG(LogTemp, Error,
+			TEXT("[WardenInit] committed=false reason=candidate-preflight failureMode=%d planned=%d actors=%d candidates=%d"),
+			FailureMode, LastPlannedEnemyCount, SpawnedEnemyActors.Num(),
+			static_cast<int32>(Candidates.size()));
+		return false;
+	}
+
+	ADungeonEnemy* Selected = CandidateActors[static_cast<int32>(SelectedIndex)];
+	FCombatConfigRow EffectiveRow = Row;
+	if (FailureMode == 5)
+	{
+		EffectiveRow.WardenMaxHP = 0.0f;
+	}
+#if !UE_BUILD_SHIPPING
+	if (FailureMode == 4)
+	{
+		Selected->SetWardenConfigFaultModeForTests(1);
+	}
+#endif
+	if (!Selected->ConfigureAsWarden(EffectiveRow, ResolveTokens))
+	{
+		FinaleInitState = EUegameFinaleInitState::Failed;
+		for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : SpawnedEnemyActors)
+		{
+			if (const ADungeonEnemy* Enemy = WeakEnemy.Get(); Enemy && Enemy->IsWarden())
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("[WardenInit] rollback-invariant=false unexpectedOrdinal=%d"),
+					Enemy->GetSpawnOrdinal());
+			}
+		}
+		UE_LOG(LogTemp, Error,
+			TEXT("[WardenInit] committed=false reason=profile-or-atomic-config failureMode=%d room=%d ordinal=%d"),
+			FailureMode, Selected->GetRoomIndex(), Selected->GetSpawnOrdinal());
+		return false;
+	}
+
+	WardenEnemy = Selected;
+	FinaleInitState = EUegameFinaleInitState::Succeeded;
+	UE_LOG(LogTemp, Display,
+		TEXT("[WardenSelection] committed=true room=%d farthestRoom=%d ordinal=%d sourceType=%d fallback=%s actorCount=%d location=(%.1f,%.1f,%.1f)"),
+		Selected->GetRoomIndex(), FarthestRoomIndex, Selected->GetSpawnOrdinal(),
+		Selected->GetArchetypeTypeId(),
+		Selected->GetRoomIndex() == FarthestRoomIndex ? TEXT("false") : TEXT("true"),
+		SpawnedEnemyActors.Num(), Selected->GetActorLocation().X,
+		Selected->GetActorLocation().Y, Selected->GetActorLocation().Z);
+	return true;
+}
+
+void ADungeonSpawner::NotifyEnemyDead(ADungeonEnemy* Enemy)
+{
+	if (!Enemy || Enemy->GetOwningSpawner() != this)
+	{
+		return;
+	}
+	const int32 InRoomIndex = Enemy->GetRoomIndex();
 	if (!RoomAliveCounts.IsValidIndex(InRoomIndex))
 	{
 		return;
 	}
-	RoomAliveCounts[InRoomIndex] = FMath::Max(0, RoomAliveCounts[InRoomIndex] - 1);
+	const int32 OldAlive = RoomAliveCounts[InRoomIndex];
+	if (OldAlive <= 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[Combat] duplicate enemy death rejected room=%d ordinal=%d"),
+			InRoomIndex, Enemy->GetSpawnOrdinal());
+		return;
+	}
+	RoomAliveCounts[InRoomIndex] = FMath::Max(0, OldAlive - 1);
+	const int32 NewAlive = RoomAliveCounts[InRoomIndex];
+	if (WardenEnemy.Get() == Enemy && Enemy->IsWarden())
+	{
+		bWardenDefeated = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("[WardenDefeated] room=%d ordinal=%d ordinaryAlive=%d totalAlive=%d"),
+			InRoomIndex, Enemy->GetSpawnOrdinal(), GetLivingOrdinaryEnemyCount(),
+			GetTotalAliveEnemies());
+	}
 	UE_LOG(LogTemp, Display, TEXT("[Combat] enemy down in room=%d, alive=%d"),
-		InRoomIndex, RoomAliveCounts[InRoomIndex]);
+		InRoomIndex, NewAlive);
 
 	// Rooms that never had enemies (e.g. the start room) never fire RoomCleared.
-	if (RoomAliveCounts[InRoomIndex] == 0 && RoomInitialCounts[InRoomIndex] > 0)
+	if (OldAlive > 0 && NewAlive == 0 && RoomInitialCounts[InRoomIndex] > 0)
 	{
 		// Evidence (acceptance E).
 		UE_LOG(LogTemp, Display, TEXT("[RoomClear] room=%d cleared (initial=%d)"),
 			InRoomIndex, RoomInitialCounts[InRoomIndex]);
-
-		// If that was the last enemy room, the require-floor-clear gate just opened. The stairs
-		// overlap is edge-triggered but the gate is level-triggered, so a player standing on the
-		// pad when the final enemy falls would otherwise stay stuck until stepping off and back
-		// on. Re-poke the stairs to descend in place. Harmless under descend-anytime (the player
-		// would already have descended on overlap and the pad is gone).
-		if (AreAllRoomsCleared())
+		if (UWorld* World = GetWorld())
 		{
-			if (UWorld* World = GetWorld())
+			if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
 			{
-				// M5: offer the floor-clear reward BEFORE re-poking the stairs. NotifyFloorCleared() sets
-				// RewardPending (unless this is the final floor), so the re-poke below is intentionally
-				// blocked by the reward gate until the player picks - the reward can't be skipped by the
-				// auto-descend for a player already standing on the pad.
-				if (UUegameFloorManager* FM = UUegameFloorManager::Get(World))
-				{
-					FM->NotifyFloorCleared();
-				}
-				for (TActorIterator<ADungeonStairs> It(World); It; ++It)
-				{
-					It->OnFloorCleared();
-				}
+				const int32 CachedRole = CachedRoomRoles.IsValidIndex(InRoomIndex)
+					? CachedRoomRoles[InRoomIndex] : INDEX_NONE;
+				FM->NotifyRoomCleared(this, InRoomIndex, CachedRole, OldAlive, NewAlive);
 			}
 		}
 	}
 }
 
+FFloorExitNeutralizationResult ADungeonSpawner::DeactivateRemainingEnemiesForExit(int32 InFloorIndex)
+{
+	FFloorExitNeutralizationResult Result;
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld() || !bEncounterAssigned
+		|| EncounterFloorIndex != InFloorIndex)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=collection reason=stale-source"),
+			InFloorIndex);
+		return Result;
+	}
+
+	int32 FailureMode = 0;
+#if !UE_BUILD_SHIPPING
+	FailureMode = ExitWithdrawalFailureModeForTests;
+	ExitWithdrawalFailureModeForTests = 0;
+#endif
+	Result.ExpectedActive = GetTotalAliveEnemies();
+	TArray<TWeakObjectPtr<ADungeonEnemy>> Targets;
+	TSet<int64> UniqueIds;
+
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Enemy = *It;
+		if (!IsValid(Enemy) || Enemy->GetWorld() != World
+			|| Enemy->GetOwningSpawner() != this || !Enemy->IsActiveThreat())
+		{
+			continue;
+		}
+		const int64 Id = static_cast<int64>(Enemy->GetUniqueID());
+		if (UniqueIds.Contains(Id))
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("[FloorExitTxn] floor=%d success=false phase=collection reason=duplicate-identity id=%lld"),
+				InFloorIndex, Id);
+			return Result;
+		}
+		UniqueIds.Add(Id);
+		Targets.Add(Enemy);
+		Result.CollectedIds.Add(Id);
+		++Result.Collected;
+	}
+	Result.CollectedIds.Sort();
+	TArray<FString> CollectedIdStrings;
+	for (const int64 Id : Result.CollectedIds)
+	{
+		CollectedIdStrings.Add(FString::Printf(TEXT("%lld"), Id));
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorExitTxnSet] floor=%d phase=collection count=%d ids=%s"),
+		InFloorIndex, Result.CollectedIds.Num(), *FString::Join(CollectedIdStrings, TEXT(",")));
+	// No mutation has occurred; the collected active set is still the exact remaining set.
+	Result.RemainingActive = Result.Collected;
+	Result.bCollectionPassed = Result.Collected == Result.ExpectedActive;
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorExitTxn] floor=%d phase=collection expected=%d collected=%d passed=%s fault=%d"),
+		InFloorIndex, Result.ExpectedActive, Result.Collected,
+		Result.bCollectionPassed ? TEXT("true") : TEXT("false"), FailureMode);
+	if (!Result.bCollectionPassed || FailureMode == 1)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=collection reason=%s expected=%d collected=%d neutralized=0 destroyQueued=0 remainingActive=%d residualPrepared=0"),
+			InFloorIndex, FailureMode == 1 ? TEXT("forced-after-collection") : TEXT("count-mismatch"),
+			Result.ExpectedActive, Result.Collected, Result.RemainingActive);
+		return Result;
+	}
+
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		ADungeonEnemy* Enemy = WeakEnemy.Get();
+		if (!IsValid(Enemy) || Enemy->GetWorld() != World
+			|| Enemy->GetOwningSpawner() != this || !Enemy->IsActiveThreat())
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[FloorExitTxn] floor=%d success=false phase=preflight reason=identity-changed expected=%d collected=%d preflighted=%d neutralized=0 destroyQueued=0 remainingActive=%d residualPrepared=0"),
+				InFloorIndex, Result.ExpectedActive, Result.Collected, Result.Preflighted,
+				Result.RemainingActive);
+			return Result;
+		}
+		++Result.Preflighted;
+	}
+	Result.bPreflightPassed = Result.Preflighted == Result.ExpectedActive;
+	UE_LOG(LogTemp, Display,
+		TEXT("[FloorExitTxn] floor=%d phase=preflight expected=%d preflighted=%d passed=%s fault=%d"),
+		InFloorIndex, Result.ExpectedActive, Result.Preflighted,
+		Result.bPreflightPassed ? TEXT("true") : TEXT("false"), FailureMode);
+	if (!Result.bPreflightPassed || FailureMode == 2)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=preflight reason=%s expected=%d collected=%d preflighted=%d neutralized=0 destroyQueued=0 remainingActive=%d residualPrepared=0"),
+			InFloorIndex, FailureMode == 2 ? TEXT("forced-after-preflight") : TEXT("count-mismatch"),
+			Result.ExpectedActive, Result.Collected, Result.Preflighted, Result.RemainingActive);
+		return Result;
+	}
+
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		ADungeonEnemy* Enemy = WeakEnemy.Get();
+		bool bDestroyQueued = false;
+		if (!Enemy || !Enemy->NeutralizeForFloorExit(bDestroyQueued))
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("[FloorExitTxn] floor=%d success=false phase=commit reason=preflighted-enemy-rejected neutralized=%d"),
+				InFloorIndex, Result.Neutralized);
+			break;
+		}
+		++Result.Neutralized;
+		Result.DestroyQueued += bDestroyQueued ? 1 : 0;
+	}
+
+	// Destroy is deferred; the synchronous active-threat state is the safety authority.
+	Result.RemainingActive = 0;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		const ADungeonEnemy* Enemy = *It;
+		if (IsValid(Enemy) && Enemy->GetWorld() == World
+			&& Enemy->GetOwningSpawner() == this && Enemy->IsActiveThreat())
+		{
+			++Result.RemainingActive;
+		}
+	}
+
+	Result.bSuccess = Result.Neutralized == Result.ExpectedActive
+		&& Result.RemainingActive == 0 && Result.ResidualPrepared == 0;
+	if (Result.bSuccess)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[FloorExitTxn] floor=%d success=true phase=commit expected=%d collected=%d preflighted=%d neutralized=%d destroyQueued=%d remainingActive=%d residualPrepared=%d"),
+			InFloorIndex, Result.ExpectedActive, Result.Collected, Result.Preflighted,
+			Result.Neutralized, Result.DestroyQueued, Result.RemainingActive, Result.ResidualPrepared);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[FloorExitTxn] floor=%d success=false phase=commit expected=%d neutralized=%d destroyQueued=%d remainingActive=%d residualPrepared=%d"),
+			InFloorIndex, Result.ExpectedActive, Result.Neutralized, Result.DestroyQueued,
+			Result.RemainingActive, Result.ResidualPrepared);
+	}
+	return Result;
+}
+
+FChallengeContractTransactionResult ADungeonSpawner::ApplyChallengeContractTransactional(int32 InRoomIndex)
+{
+	FChallengeContractTransactionResult Result;
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld() || !RoomAliveCounts.IsValidIndex(InRoomIndex))
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[RoomContractTxn] room=%d preflight=false reason=invalid-world-or-room"), InRoomIndex);
+		return Result;
+	}
+
+	Result.Expected = RoomAliveCounts[InRoomIndex];
+	TArray<TWeakObjectPtr<ADungeonEnemy>> Targets;
+	for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+	{
+		ADungeonEnemy* Enemy = *It;
+		if (!IsValid(Enemy) || Enemy->GetWorld() != World
+			|| Enemy->GetOwningSpawner() != this || Enemy->GetRoomIndex() != InRoomIndex
+			|| !Enemy->IsActiveThreat())
+		{
+			continue;
+		}
+		++Result.ObservedActive;
+		Result.ExpectedIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		if (Enemy->CanApplyRoomChallengeModifier())
+		{
+			++Result.Eligible;
+			Result.EligibleIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+			Targets.Add(Enemy);
+		}
+	}
+
+	int32 FailureMode = 0;
+#if !UE_BUILD_SHIPPING
+	FailureMode = ChallengeContractFailureModeForTests;
+	ChallengeContractFailureModeForTests = 0; // one-shot: never leak a negative seam into a later floor
+#endif
+	const bool bForcedStale = FailureMode == 1;
+	Result.bTargetCurrent = !bForcedStale;
+	Result.bPreflightPassed = !bForcedStale && Result.Expected > 0
+		&& Result.ObservedActive == Result.Expected && Result.Eligible == Result.Expected;
+	if (!Result.bPreflightPassed)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[RoomContractTxn] room=%d preflight=false expected=%d observed=%d eligible=%d forcedStale=%s applied=0 rollback=0"),
+			InRoomIndex, Result.Expected, Result.ObservedActive, Result.Eligible,
+			bForcedStale ? TEXT("true") : TEXT("false"));
+		return Result;
+	}
+
+	TArray<TWeakObjectPtr<ADungeonEnemy>> AppliedTargets;
+	const bool bForcePartial = FailureMode == 2;
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		ADungeonEnemy* Enemy = WeakEnemy.Get();
+		if (!Enemy || !Enemy->ApplyRoomChallengeModifier())
+		{
+			break;
+		}
+		AppliedTargets.Add(Enemy);
+		++Result.Applied;
+		Result.AppliedIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		if (bForcePartial && Result.Applied == 1)
+		{
+			break;
+		}
+	}
+
+	if (!bForcePartial && Result.Applied == Result.Expected)
+	{
+		Result.bCommitted = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("[RoomContractTxn] room=%d preflight=true expected=%d observed=%d eligible=%d applied=%d committed=true"),
+			InRoomIndex, Result.Expected, Result.ObservedActive, Result.Eligible, Result.Applied);
+		return Result;
+	}
+
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : AppliedTargets)
+	{
+		if (ADungeonEnemy* Enemy = WeakEnemy.Get(); Enemy && Enemy->RollbackRoomChallengeModifier())
+		{
+			++Result.RolledBack;
+			Result.RolledBackIds.Add(static_cast<int64>(Enemy->GetUniqueID()));
+		}
+	}
+	for (const TWeakObjectPtr<ADungeonEnemy>& WeakEnemy : Targets)
+	{
+		if (const ADungeonEnemy* Enemy = WeakEnemy.Get(); Enemy && Enemy->IsRoomChallengeModified())
+		{
+			++Result.ResidualModified;
+		}
+	}
+	Result.bRollbackComplete = Result.RolledBack == Result.Applied
+		&& Result.ResidualModified == 0;
+	UE_LOG(LogTemp, Error,
+		TEXT("[RoomContractTxn] room=%d preflight=true expected=%d observed=%d eligible=%d applied=%d committed=false rolledBack=%d residualModified=%d rollbackComplete=%s forcedPartial=%s"),
+		InRoomIndex, Result.Expected, Result.ObservedActive, Result.Eligible, Result.Applied,
+		Result.RolledBack, Result.ResidualModified,
+		Result.bRollbackComplete ? TEXT("true") : TEXT("false"),
+		bForcePartial ? TEXT("true") : TEXT("false"));
+	return Result;
+}
+
 void ADungeonSpawner::Build()
 {
+	bHasBuiltLayoutIdentity = false;
+	BuiltSeed64 = 0;
+	BuiltTileSize = 0.0f;
+	BuiltWallHeight = 0.0f;
+	BuiltSpawnPlanHash = 0;
 	if (!FloorISM || !WallISM || !CorridorISM || !DoorISM)
 	{
 		return;
@@ -444,6 +900,7 @@ void ADungeonSpawner::Build()
 
 	// --- Fidelity log (the programmatic half of acceptance #2) ---
 	const m2::WorldReach WR = m2::worldReachability(Layout, WC);
+	const uint64 BuiltHash = m2::spawnPlanHash(Layout, WC);
 	const int32 SpawnedWalkable =
 		FloorISM->GetInstanceCount() + CorridorISM->GetInstanceCount() + DoorISM->GetInstanceCount();
 	const int32 SpawnedTotal = SpawnedWalkable + WallISM->GetInstanceCount();
@@ -459,7 +916,252 @@ void ADungeonSpawner::Build()
 		WR.reached, WR.passable,
 		WR.roomsReached, WR.rooms,
 		WR.fullyConnected() ? TEXT("YES") : TEXT("NO"),
-		static_cast<unsigned long long>(m2::spawnPlanHash(Layout, WC)));
+		static_cast<unsigned long long>(BuiltHash));
+
+	// Publish only after every geometry instance and fidelity check above completed. Route
+	// fallback regenerates from these values and rejects any later property/seed drift.
+	if (!m8grid::is_exact_positive_integer_step(TileSize))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ObjectiveGridRoute] built identity withheld: TileSize %.6f is not an exact positive integer world step"),
+			TileSize);
+		return;
+	}
+	BuiltSeed64 = GetEffectiveSeed64();
+	BuiltTileSize = static_cast<float>(WC.tileSize);
+	BuiltWallHeight = WallHeight;
+	BuiltSpawnPlanHash = BuiltHash;
+	bHasBuiltLayoutIdentity = true;
+}
+
+void ADungeonSpawner::ApplyPresentationTheme()
+{
+	if (!FloorISM || !WallISM || !CorridorISM || !DoorISM)
+	{
+		return;
+	}
+	if (!FloorMID)
+	{
+		FloorMID = FloorISM->CreateDynamicMaterialInstance(0);
+		WallMID = WallISM->CreateDynamicMaterialInstance(0);
+		CorridorMID = CorridorISM->CreateDynamicMaterialInstance(0);
+		DoorMID = DoorISM->CreateDynamicMaterialInstance(0);
+	}
+
+	int32 FloorIndex = 1;
+	if (const UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld());
+		FM && FM->IsRunActive())
+	{
+		FloorIndex = FMath::Clamp(FM->GetFloorIndex(), 1, 3);
+	}
+
+	const FLinearColor FloorColors[] = {
+		FLinearColor(0.025f, 0.055f, 0.085f),
+		FLinearColor(0.030f, 0.045f, 0.085f),
+		FLinearColor(0.065f, 0.030f, 0.070f)
+	};
+	const FLinearColor WallColors[] = {
+		FLinearColor(0.018f, 0.030f, 0.050f),
+		FLinearColor(0.020f, 0.025f, 0.052f),
+		FLinearColor(0.045f, 0.018f, 0.050f)
+	};
+	const FLinearColor CorridorColors[] = {
+		FLinearColor(0.035f, 0.120f, 0.145f),
+		FLinearColor(0.035f, 0.090f, 0.145f),
+		FLinearColor(0.125f, 0.040f, 0.120f)
+	};
+	const int32 PaletteIndex = FloorIndex - 1;
+	if (FloorMID)
+	{
+		FloorMID->SetVectorParameterValue(TEXT("Color"), FloorColors[PaletteIndex]);
+	}
+	if (WallMID)
+	{
+		WallMID->SetVectorParameterValue(TEXT("Color"), WallColors[PaletteIndex]);
+	}
+	if (CorridorMID)
+	{
+		CorridorMID->SetVectorParameterValue(TEXT("Color"), CorridorColors[PaletteIndex]);
+	}
+	if (DoorMID)
+	{
+		DoorMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.90f, 0.38f, 0.055f));
+	}
+}
+
+FObjectiveGridRoute ADungeonSpawner::ResolveObjectiveGridRoute(
+	const FVector& PawnLocation,
+	const FVector& TargetLocation,
+	float AgentRadius) const
+{
+	FObjectiveGridRoute Result;
+	Result.BuiltPlanHash = BuiltSpawnPlanHash;
+	if (!bHasBuiltLayoutIdentity)
+	{
+		return Result;
+	}
+	if (GetEffectiveSeed64() != BuiltSeed64
+		|| !FMath::IsNearlyEqual(TileSize, BuiltTileSize)
+		|| !FMath::IsNearlyEqual(WallHeight, BuiltWallHeight))
+	{
+		Result.Result = EObjectiveGridRouteResult::IdentityMismatch;
+		return Result;
+	}
+
+	dungeon::Config Cfg;
+	Cfg.seed = BuiltSeed64;
+	const dungeon::Layout Layout = dungeon::generate(Cfg);
+	m2::WorldConfig WC;
+	WC.tileSize = static_cast<long long>(BuiltTileSize);
+	WC.wallHeight = static_cast<long long>(BuiltWallHeight);
+	if (m2::spawnPlanHash(Layout, WC) != BuiltSpawnPlanHash)
+	{
+		Result.Result = EObjectiveGridRouteResult::IdentityMismatch;
+		return Result;
+	}
+
+	std::vector<std::uint8_t> Walkable;
+	Walkable.reserve(Layout.grid.size());
+	for (const dungeon::Tile Tile : Layout.grid)
+	{
+		Walkable.push_back(dungeon::isPassable(Tile) ? 1u : 0u);
+	}
+	const m8grid::Cell Start = m8grid::world_to_cell(
+		PawnLocation.X, PawnLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	const m8grid::Cell Goal = m8grid::world_to_cell(
+		TargetLocation.X, TargetLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	if (!m8grid::valid_cell(Cfg.width, Cfg.height, Start)
+		|| !m8grid::valid_cell(Cfg.width, Cfg.height, Goal)
+		|| !dungeon::isPassable(Layout.at(Start.x, Start.y))
+		|| !dungeon::isPassable(Layout.at(Goal.x, Goal.y)))
+	{
+		Result.Result = EObjectiveGridRouteResult::InvalidEndpoint;
+		return Result;
+	}
+
+	const std::vector<m8grid::Cell> Path = m8grid::shortest_path(
+		Cfg.width, Cfg.height, Walkable, Start, Goal);
+	Result.PathCellCount = static_cast<int32>(Path.size());
+	if (Path.empty())
+	{
+		Result.Result = EObjectiveGridRouteResult::Unreachable;
+		return Result;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		Result.Result = EObjectiveGridRouteResult::LocalSegmentBlocked;
+		return Result;
+	}
+	const float ClearanceRadius = FMath::Max(AgentRadius, 35.0f);
+	const float SweepZ = FMath::Max(PawnLocation.Z, BuiltWallHeight * 0.5f);
+	const FVector SweepStart(PawnLocation.X, PawnLocation.Y, SweepZ);
+	auto CellCenter = [this, SweepZ](const m8grid::Cell& Cell)
+	{
+		return FVector(
+			(static_cast<float>(Cell.x) + 0.5f) * BuiltTileSize,
+			(static_cast<float>(Cell.y) + 0.5f) * BuiltTileSize,
+			SweepZ);
+	};
+	auto SegmentClear = [World, SweepStart, ClearanceRadius](const FVector& Candidate)
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(ObjectiveGridRoute), false);
+		const FVector SweepEnd(Candidate.X, Candidate.Y, SweepStart.Z);
+		return !World->SweepTestByObjectType(
+			SweepStart, SweepEnd, FQuat::Identity,
+			FCollisionObjectQueryParams(ECC_WorldStatic),
+			FCollisionShape::MakeSphere(ClearanceRadius), Params);
+	};
+
+	if (Path.size() == 1)
+	{
+		const FVector TargetCandidate(TargetLocation.X, TargetLocation.Y, SweepZ);
+		if (SegmentClear(TargetCandidate))
+		{
+			Result.Result = EObjectiveGridRouteResult::ReadyTarget;
+			Result.Waypoint = TargetCandidate;
+			return Result;
+		}
+		const FVector CurrentCenter = CellCenter(Path[0]);
+		if (SegmentClear(CurrentCenter))
+		{
+			Result.Result = EObjectiveGridRouteResult::ReadyRecenter;
+			Result.Waypoint = CurrentCenter;
+			return Result;
+		}
+		Result.Result = EObjectiveGridRouteResult::LocalSegmentBlocked;
+		return Result;
+	}
+
+	const m8grid::WaypointCandidates Candidates =
+		m8grid::ordered_waypoint_candidates(Path);
+	const FVector Primary = CellCenter(Candidates.primary);
+	const bool bPrimaryClear = SegmentClear(Primary);
+	FVector Fallback = FVector::ZeroVector;
+	bool bFallbackClear = false;
+	if (!bPrimaryClear && Candidates.has_fallback)
+	{
+		Fallback = CellCenter(Candidates.fallback);
+		bFallbackClear = SegmentClear(Fallback);
+	}
+	switch (m8grid::choose_clear_candidate(Candidates, bPrimaryClear, bFallbackClear))
+	{
+	case m8grid::CandidateChoice::Primary:
+		Result.Result = EObjectiveGridRouteResult::ReadyNext;
+		Result.Waypoint = Primary;
+		return Result;
+	case m8grid::CandidateChoice::Fallback:
+		Result.Result = EObjectiveGridRouteResult::ReadyRecenter;
+		Result.Waypoint = Fallback;
+		return Result;
+	case m8grid::CandidateChoice::Blocked:
+	default:
+		Result.Result = EObjectiveGridRouteResult::LocalSegmentBlocked;
+		return Result;
+	}
+}
+
+bool ADungeonSpawner::TryMeasureObjectiveGridPath(
+	const FVector& StartLocation,
+	const FVector& TargetLocation,
+	double& OutLength) const
+{
+	OutLength = 0.0;
+	if (!bHasBuiltLayoutIdentity || GetEffectiveSeed64() != BuiltSeed64
+		|| !FMath::IsNearlyEqual(TileSize, BuiltTileSize)
+		|| !FMath::IsNearlyEqual(WallHeight, BuiltWallHeight))
+	{
+		return false;
+	}
+	dungeon::Config Cfg;
+	Cfg.seed = BuiltSeed64;
+	const dungeon::Layout Layout = dungeon::generate(Cfg);
+	m2::WorldConfig WC;
+	WC.tileSize = static_cast<long long>(BuiltTileSize);
+	WC.wallHeight = static_cast<long long>(BuiltWallHeight);
+	if (m2::spawnPlanHash(Layout, WC) != BuiltSpawnPlanHash)
+	{
+		return false;
+	}
+	std::vector<std::uint8_t> Walkable;
+	Walkable.reserve(Layout.grid.size());
+	for (const dungeon::Tile Tile : Layout.grid)
+	{
+		Walkable.push_back(dungeon::isPassable(Tile) ? 1u : 0u);
+	}
+	const m8grid::Cell Start = m8grid::world_to_cell(
+		StartLocation.X, StartLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	const m8grid::Cell Goal = m8grid::world_to_cell(
+		TargetLocation.X, TargetLocation.Y, WC.originX, WC.originY, BuiltTileSize);
+	const std::vector<m8grid::Cell> Path = m8grid::shortest_path(
+		Cfg.width, Cfg.height, Walkable, Start, Goal);
+	if (Path.empty())
+	{
+		return false;
+	}
+	OutLength = static_cast<double>(Path.size() - 1) * BuiltTileSize;
+	return FMath::IsFinite(OutLength);
 }
 
 void ADungeonSpawner::SpawnNavBounds()
@@ -589,13 +1291,33 @@ void ADungeonSpawner::RefreshNavigation()
 	}
 }
 
-void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride, float InEnemyHPOverride)
+bool ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOverride,
+	float InEnemyHPOverride, const FCombatConfigRow* FinaleConfig, int32 ResolveTokens)
 {
 	UWorld* World = GetWorld();
 	if (!World || !World->IsGameWorld())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[Dungeon] RegenerateFloor is game-world only"));
-		return;
+		return false;
+	}
+
+	// Clear additive finale identity before destroying floor-N actors. No weak pointer or guard
+	// state may survive a floor transition or explicit new run.
+	ResetFinaleState();
+	SpawnedEnemyActors.Reset();
+	LastPlannedRooms.Reset();
+	LastPlannedEnemyCount = 0;
+	// Retract the prior floor's exit before any new-floor actor is published. SpawnStairs()
+	// also enforces uniqueness defensively, but a failed finale never calls it; leaving this
+	// cleanup there would strand the prior floor's live trigger in the failed transaction.
+	int32 DespawnedStairs = 0;
+	for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+	{
+		if (IsValid(*It) && !It->IsActorBeingDestroyed())
+		{
+			It->Destroy();
+			++DespawnedStairs;
+		}
 	}
 
 	// Despawn floor-N enemies silently (Destroy path skips HandleDeath, so no RoomClear noise).
@@ -608,13 +1330,17 @@ void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 
 	SetSeed64(NewSeed);
 	Build();                 // ClearInstances + rebuild geometry from the new layout
+	ApplyPresentationTheme();
 	RefreshNavigation();     // re-dirty the whole map so the navmesh rebuilds in place
 
 	if (bTeleportPlayerToStart)
 	{
 		if (APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0))
 		{
-			Pawn->SetActorLocation(StartWorld + FVector(0.0f, 0.0f, 100.0f));
+			Pawn->SetActorLocation(
+				StartWorld + FVector(0.0f, 0.0f, 100.0f),
+				false, nullptr, ETeleportType::TeleportPhysics);
+			RefreshPlayerCameraAfterFloorTeleport(Pawn);
 			UE_LOG(LogTemp, Display, TEXT("[Placement] player at start (RegenerateFloor) seed=%llu"),
 				static_cast<unsigned long long>(NewSeed));
 		}
@@ -623,9 +1349,15 @@ void ADungeonSpawner::RegenerateFloor(uint64 NewSeed, int32 InEnemiesPerRoomOver
 	{
 		SpawnEnemies(InEnemiesPerRoomOverride, InEnemyHPOverride);
 	}
-	SpawnStairs();           // M4: fresh descend trigger in the new farthest room
+	const bool bFinaleCommitted = !FinaleConfig || InitializeFinale(*FinaleConfig, ResolveTokens);
+	if (bFinaleCommitted)
+	{
+		SpawnStairs();         // M4: publish the fresh descend trigger only after the floor transaction commits
+	}
 
 	UE_LOG(LogTemp, Display,
-		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d (in-place, world+navsystem kept alive)"),
-		static_cast<unsigned long long>(NewSeed), Despawned);
+		TEXT("[Dungeon] RegenerateFloor: seed=%llu despawned=%d despawnedStairs=%d finaleRequested=%s finaleCommitted=%s (in-place, world+navsystem kept alive)"),
+		static_cast<unsigned long long>(NewSeed), Despawned, DespawnedStairs,
+		FinaleConfig ? TEXT("true") : TEXT("false"), bFinaleCommitted ? TEXT("true") : TEXT("false"));
+	return bFinaleCommitted;
 }

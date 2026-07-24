@@ -16,7 +16,7 @@
 		},
 		{
 			"Name": "uegameEditor",
-			"Type": "Editor",
+			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "Default"
 		}
 	],
@@ -37,8 +37,11 @@
 			"Enabled": true
 		},
 		{
-			"Name": "ModelContextProtocol",
-			"Enabled": true
+			"Name": "ToolsetRegistry",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
 		}
 	]
 }

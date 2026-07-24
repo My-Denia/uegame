@@ -63,6 +63,20 @@ void UHealthComponent::Revive(float NewHP)
 		*GetNameSafe(GetOwner()), CurrentHP, MaxHP);
 }
 
+float UHealthComponent::Heal(float Amount)
+{
+	if (bDead || Amount <= 0.0f)
+	{
+		return 0.0f;
+	}
+	const float OldHP = CurrentHP;
+	CurrentHP = FMath::Min(MaxHP, CurrentHP + Amount);
+	const float Applied = CurrentHP - OldHP;
+	UE_LOG(LogTemp, Display, TEXT("[Combat] %s healed %.0f | HP %.0f -> %.0f"),
+		*GetNameSafe(GetOwner()), Applied, OldHP, CurrentHP);
+	return Applied;
+}
+
 void UHealthComponent::SetMaxHP(float NewMaxHP, bool bTopUpCurrent)
 {
 	const float OldMax = MaxHP;

@@ -84,3 +84,46 @@ add_test(NAME m6_encounter_goldenvec
                  -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/m6_encounter_golden.actual.txt
                  -DWEIGHTS=${CMAKE_CURRENT_SOURCE_DIR}/uegame/Content/Data/EncounterWeights.csv
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/diff_m6_golden.cmake)
+
+# --- M8A build synergy: RNG-free ordered combat rules/state (additive; M1-M7 frozen) ---
+add_executable(m8_build_synergy_test test_m8_build_synergy.cpp m8_build_synergy.cpp)
+target_sources(m8_build_synergy_test PRIVATE m8_build_synergy.hpp)
+add_test(NAME m8_build_synergy COMMAND m8_build_synergy_test)
+
+# --- M8 2A enemy behavior: bounded phase/timing core (additive; M1-M7 frozen) ---
+add_executable(m8_enemy_behavior_test test_m8_enemy_behavior.cpp m8_enemy_behavior.cpp)
+target_sources(m8_enemy_behavior_test PRIVATE m8_enemy_behavior.hpp)
+add_test(NAME m8_enemy_behavior COMMAND m8_enemy_behavior_test)
+
+# --- M8 objective compass: engine-independent candidate ordering + eight-way direction core ---
+add_executable(m8_objective_compass_test test_m8_objective_compass.cpp m8_objective_compass.cpp)
+target_sources(m8_objective_compass_test PRIVATE m8_objective_compass.hpp)
+add_test(NAME m8_objective_compass COMMAND m8_objective_compass_test)
+
+# --- M8 build-route reachability over a six-affix fixture + M8 synergy core ---
+add_executable(test_m8_build_routes test_m8_build_routes.cpp m5_loadout.cpp m8_build_synergy.cpp)
+target_sources(test_m8_build_routes PRIVATE m5_loadout.hpp m8_build_synergy.hpp)
+target_compile_options(test_m8_build_routes PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+add_test(NAME m8_build_routes COMMAND test_m8_build_routes)
+
+# --- M8 room flow: role-clear healing + post-pick recovery (additive; no RNG) ---
+add_executable(m8_room_flow_test test_m8_room_flow.cpp m8_room_flow.cpp m8_room_contract.cpp)
+target_sources(m8_room_flow_test PRIVATE m8_room_flow.hpp m8_room_contract.hpp)
+add_test(NAME m8_room_flow COMMAND m8_room_flow_test)
+
+# --- M8 finale: deterministic Warden selection, guard and exposed-window arithmetic ---
+add_executable(m8_finale_test test_m8_finale.cpp m8_finale.cpp)
+target_sources(m8_finale_test PRIVATE m8_finale.hpp)
+add_test(NAME m8_finale COMMAND m8_finale_test)
+
+# --- M8 runtime authority: engine-independent exit/reward and lifecycle policy ---
+add_executable(m8_runtime_authority_test
+               test_m8_runtime_authority.cpp
+               m8_runtime_authority.cpp)
+target_sources(m8_runtime_authority_test PRIVATE m8_runtime_authority.hpp)
+add_test(NAME m8_runtime_authority COMMAND m8_runtime_authority_test)
+
+# --- M8 presentation: deterministic project-owned event tone PCM (additive; no UE) ---
+add_executable(m8_presentation_test test_m8_presentation.cpp m8_presentation.cpp)
+target_sources(m8_presentation_test PRIVATE m8_presentation.hpp)
+add_test(NAME m8_presentation COMMAND m8_presentation_test)

@@ -13,6 +13,8 @@ class UInputAction;
 class UHealthComponent;
 class UCombatComponent;
 class ULoadoutComponent;
+class UBuildSynergyComponent;
+class UPresentationFeedbackComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -66,6 +68,14 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	ULoadoutComponent* Loadout;
 
+	/** M8A transient build-identity state; rules remain in the engine-independent core. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	UBuildSynergyComponent* BuildSynergy;
+
+	/** Short-lived event feedback only; owns no gameplay truth. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Presentation")
+	UPresentationFeedbackComponent* PresentationFeedback;
+
 public:
 
 	/** Constructor */
@@ -110,6 +120,14 @@ public:
 	 *  and the stairs re-poke live in one place; also driven by Dungeon.ChooseLoadout and keys 1/2/3. */
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	virtual void DoChooseLoadout(int32 Index);
+
+	/** Player-facing run controls. These remain active while the world is paused. */
+	UFUNCTION(BlueprintCallable, Category="Run")
+	virtual void DoTogglePause();
+	UFUNCTION(BlueprintCallable, Category="Run")
+	virtual void DoManualRestart();
+	UFUNCTION(BlueprintCallable, Category="Run")
+	virtual void DoQuit();
 
 protected:
 

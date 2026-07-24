@@ -12,14 +12,26 @@
 #include "EngineUtils.h"        // TActorIterator
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/PlatformTime.h"
 #include "Math/UnrealMathUtility.h"
+#include "NavigationData.h"
+#include "NavigationPath.h"
+#include "NavigationSystem.h"
+#include "NavigationSystemTypes.h"
 
+#include "../Combat/BuildSynergyComponent.h"
 #include "../Combat/DungeonEnemy.h"
+#include "../Combat/DungeonStairs.h"
 #include "../Combat/EncounterConfig.h"
 #include "../Combat/FloorManager.h"
 #include "../Combat/HealthComponent.h"
 #include "../Combat/LoadoutComponent.h"
 #include "../DungeonSpawner.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
+#include "../uegamePlayerController.h"
+
+#include "m8_objective_compass.hpp"
+#include "m8_presentation.hpp"
 
 // --- Toggles (default ON: this is readability UI we want visible in normal play + capture) ---
 static TAutoConsoleVariable<int32> CVarShowReadout(
@@ -30,6 +42,16 @@ static TAutoConsoleVariable<int32> CVarShowReadout(
 static TAutoConsoleVariable<float> CVarReadoutScale(
 	TEXT("ui.ShowReadoutScale"), 1.0f,
 	TEXT("M7A.1 readability HUD text scale multiplier (clamped 0.5..4.0; default 1.0)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShowDiagnostics(
+	TEXT("ui.ShowDiagnostics"), 0,
+	TEXT("Optional engineering details in the HUD: 1 = seed/hash/initial roster, 0 = player-facing view."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShowObjectiveRoute(
+	TEXT("ui.ShowObjectiveRoute"), 1,
+	TEXT("Objective route (Recast primary, verified grid fallback): 1 = query/draw, 0 = zero queries."),
 	ECVF_Default);
 
 // --- M7A.2 per-enemy readout (archetype nameplates + live HP bars) ---
@@ -61,17 +83,35 @@ namespace
 		FLinearColor Color = FLinearColor::White;
 	};
 
-	const FLinearColor kHeader(0.62f, 0.84f, 1.00f, 1.0f);   // light blue section header
-	const FLinearColor kBody  (0.93f, 0.93f, 0.93f, 1.0f);   // near-white body text
-	const FLinearColor kAccent(1.00f, 0.84f, 0.20f, 1.0f);   // yellow: reward / attention
-	const FLinearColor kDim   (0.60f, 0.60f, 0.60f, 1.0f);   // dim: unavailable / stale
-	const FLinearColor kPanelBg(0.0f, 0.0f, 0.0f, 0.55f);    // translucent black backing
+	const FLinearColor kHeader(0.30f, 0.88f, 1.00f, 1.0f);   // cyan: identity / information
+	const FLinearColor kBody  (0.94f, 0.97f, 1.00f, 1.0f);   // cool white body text
+	const FLinearColor kAccent(1.00f, 0.68f, 0.16f, 1.0f);   // amber: choice / action
+	const FLinearColor kDim   (0.55f, 0.64f, 0.72f, 1.0f);   // blue-gray: secondary detail
+	const FLinearColor kPanelBg(0.015f, 0.035f, 0.065f, 0.86f); // deep navy backing
+	const FLinearColor kModalVeil(0.005f, 0.012f, 0.025f, 0.78f);
+	constexpr float kRouteThreatAcquireRangeCm = 450.0f;
+	constexpr float kRouteThreatHoldRangeCm = 750.0f;
 
 	// M7A.2 HP bar palette. Screen-space UI colors only - this is NOT the M7B world-material
 	// archetype tint; BodyMID/kEnemyBaseColor/hit-flash are untouched by contract.
 	const FLinearColor kHpGood (0.25f, 0.85f, 0.25f, 1.0f);  // fill > 50% HP
 	const FLinearColor kHpBad  (0.90f, 0.15f, 0.15f, 1.0f);  // fill < 25% HP (25..50% reuses kAccent)
 	const FLinearColor kBarBack(0.0f, 0.0f, 0.0f, 0.70f);    // HP bar backing strip
+
+	const TCHAR* RunStateName(m8authority::RunState State)
+	{
+		switch (State)
+		{
+		case m8authority::RunState::Playing: return TEXT("PLAYING");
+		case m8authority::RunState::Paused: return TEXT("PAUSED");
+		case m8authority::RunState::Won: return TEXT("WON");
+		case m8authority::RunState::Failed: return TEXT("FAILED");
+		case m8authority::RunState::Error: return TEXT("ERROR");
+		case m8authority::RunState::RestartPending: return TEXT("RESTARTING");
+		case m8authority::RunState::QuitPending: return TEXT("QUITTING");
+		}
+		return TEXT("UNKNOWN");
+	}
 
 	// Located exactly as the forensic verbs locate it (DungeonEvidence.cpp FindSpawner): the first
 	// ADungeonSpawner in the world. Guarantees the HUD reads the SAME instance Dungeon.RoomRoles /
@@ -86,6 +126,375 @@ namespace
 			}
 		}
 		return nullptr;
+	}
+
+	const TCHAR* WardenPhaseName(EUegameWardenPhase Phase)
+	{
+		switch (Phase)
+		{
+		case EUegameWardenPhase::Guarded: return TEXT("GUARDED");
+		case EUegameWardenPhase::Staggered: return TEXT("BROKEN - STRIKE NOW");
+		case EUegameWardenPhase::Exposed: return TEXT("EXPOSED");
+		case EUegameWardenPhase::Dead: return TEXT("DEFEATED");
+		case EUegameWardenPhase::Inactive:
+		default: return TEXT("INACTIVE");
+		}
+	}
+
+	const TCHAR* GridRouteResultName(EObjectiveGridRouteResult Result)
+	{
+		switch (Result)
+		{
+		case EObjectiveGridRouteResult::ReadyNext: return TEXT("GRID_READY_NEXT");
+		case EObjectiveGridRouteResult::ReadyRecenter: return TEXT("GRID_READY_RECENTER");
+		case EObjectiveGridRouteResult::ReadyTarget: return TEXT("GRID_READY_TARGET");
+		case EObjectiveGridRouteResult::IdentityUnavailable: return TEXT("GRID_IDENTITY_UNAVAILABLE");
+		case EObjectiveGridRouteResult::IdentityMismatch: return TEXT("GRID_IDENTITY_MISMATCH");
+		case EObjectiveGridRouteResult::InvalidEndpoint: return TEXT("GRID_INVALID_ENDPOINT");
+		case EObjectiveGridRouteResult::Unreachable: return TEXT("GRID_UNREACHABLE");
+		case EObjectiveGridRouteResult::LocalSegmentBlocked: return TEXT("GRID_LOCAL_SEGMENT_BLOCKED");
+		}
+		return TEXT("GRID_UNKNOWN");
+	}
+
+	const TCHAR* NavigationQueryFailureName(ENavigationQueryResult::Type Result)
+	{
+		switch (Result)
+		{
+		case ENavigationQueryResult::Invalid: return TEXT("NAV_QUERY_INVALID");
+		case ENavigationQueryResult::Error: return TEXT("NAV_QUERY_ERROR");
+		case ENavigationQueryResult::Fail: return TEXT("PATH_INVALID");
+		case ENavigationQueryResult::Success: return TEXT("SUCCESS_WITHOUT_VALID_PATH");
+		}
+		return TEXT("NAV_QUERY_UNKNOWN");
+	}
+
+	// Objective routing has stricter authority than the legacy readout: exactly one current
+	// encounter snapshot must match the active run and floor. Ambiguity clears the arrow.
+	ADungeonSpawner* FindFreshObjectiveSpawner(UWorld* World, const UUegameFloorManager* FM)
+	{
+		if (!World || !FM || !FM->IsRunActive())
+		{
+			return nullptr;
+		}
+		ADungeonSpawner* Match = nullptr;
+		for (TActorIterator<ADungeonSpawner> It(World); It; ++It)
+		{
+			ADungeonSpawner* Candidate = *It;
+			if (!IsValid(Candidate) || Candidate->IsActorBeingDestroyed()
+				|| !Candidate->HasEncounterAssignment()
+				|| Candidate->GetEncounterRunSeed() != FM->GetRunSeed()
+				|| Candidate->GetEncounterFloorIndex() != FM->GetFloorIndex())
+			{
+				continue;
+			}
+			if (Match)
+			{
+				return nullptr;
+			}
+			Match = Candidate;
+		}
+		return Match;
+	}
+
+	FString ObjectiveDirection(const FVector& Target, const APawn* Pawn, const APlayerController* PC)
+	{
+		const FVector Delta = Pawn ? Target - Pawn->GetActorLocation() : FVector::ZeroVector;
+		const FVector CameraForward = PC && PC->PlayerCameraManager
+			? PC->PlayerCameraManager->GetCameraRotation().Vector() : FVector::ZeroVector;
+		const FVector PlayerForward = Pawn ? Pawn->GetActorForwardVector() : FVector::ForwardVector;
+		return ANSI_TO_TCHAR(m8objective::direction_name(m8objective::map_direction(
+			{ Delta.X, Delta.Y }, { CameraForward.X, CameraForward.Y },
+			{ PlayerForward.X, PlayerForward.Y })));
+	}
+
+	bool TryMeasureReachablePath(
+		UWorld* World,
+		const APawn* Pawn,
+		const ADungeonSpawner* Spawner,
+		const FVector& Target,
+		double& OutLength)
+	{
+		OutLength = 0.0;
+		if (!World || !Pawn)
+		{
+			return false;
+		}
+		const FNavAgentProperties& AgentProps = Pawn->GetNavAgentPropertiesRef();
+		UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+		const ANavigationData* NavData = NavSystem
+			? NavSystem->GetNavDataForProps(AgentProps, Pawn->GetActorLocation()) : nullptr;
+		if (!NavSystem || !NavData)
+		{
+			return false;
+		}
+		const float Radius = FMath::Max(AgentProps.AgentRadius, 35.0f);
+		const float Height = FMath::Max(AgentProps.AgentHeight, 88.0f);
+		const FVector ProjectionExtent(FMath::Max(Radius * 2.0f, 100.0f),
+			FMath::Max(Radius * 2.0f, 100.0f), FMath::Max(Height, 200.0f));
+		FNavLocation Start;
+		FNavLocation End;
+		if (!NavSystem->ProjectPointToNavigation(Pawn->GetActorLocation(), Start, ProjectionExtent, NavData)
+			|| !NavSystem->ProjectPointToNavigation(Target, End, ProjectionExtent, NavData))
+		{
+			return false;
+		}
+		FPathFindingQuery Query(Pawn, *NavData, Start.Location, End.Location);
+		Query.SetAllowPartialPaths(false);
+		const FPathFindingResult Result = NavSystem->FindPathSync(Query);
+		if (Result.Result == ENavigationQueryResult::Fail)
+		{
+			// Same natural PATH_INVALID seam as the player-facing cue. The grid method
+			// binds itself to the last-built geometry identity before returning a length.
+			return Spawner && Spawner->TryMeasureObjectiveGridPath(
+				Pawn->GetActorLocation(), Target, OutLength);
+		}
+		if (Result.Result != ENavigationQueryResult::Success
+			|| !Result.Path.IsValid()
+			|| Result.IsPartial()
+			|| Result.Path->GetPathPoints().Num() < 2)
+		{
+			return false;
+		}
+		const TArray<FNavPathPoint>& Points = Result.Path->GetPathPoints();
+		for (int32 Index = 1; Index < Points.Num(); ++Index)
+		{
+			OutLength += FVector::Dist2D(Points[Index - 1].Location, Points[Index].Location);
+		}
+		return FMath::IsFinite(OutLength);
+	}
+
+	struct FObjectiveSelection
+	{
+		FHudLine Line;
+		AActor* Target = nullptr;
+		FVector TargetLocation = FVector::ZeroVector;
+		uint32 TargetKey = 0;
+		uint64 RunSeed = 0;
+		uint32 SpawnerKey = 0;
+		int32 FloorIndex = INDEX_NONE;
+	};
+
+	FObjectiveSelection MakeObjective(
+		FString Text, AActor* Target, const FVector& Location,
+		const UUegameFloorManager* FM, const ADungeonSpawner* Spawner, uint32 SyntheticKey = 0)
+	{
+		FObjectiveSelection Selection;
+		Selection.Line = { MoveTemp(Text), kAccent };
+		Selection.Target = Target;
+		Selection.TargetLocation = Location;
+		Selection.TargetKey = SyntheticKey != 0 ? SyntheticKey : (Target ? Target->GetUniqueID() : 0);
+		Selection.RunSeed = FM ? FM->GetRunSeed() : 0;
+		Selection.SpawnerKey = Spawner ? Spawner->GetUniqueID() : 0;
+		Selection.FloorIndex = FM ? FM->GetFloorIndex() : INDEX_NONE;
+		return Selection;
+	}
+
+	FObjectiveSelection SelectObjective(
+		UWorld* World, APawn* Pawn, const ULoadoutComponent* LC, const UUegameFloorManager* FM,
+		AActor* LockedTarget, uint64 LockedRunSeed, int32 LockedFloorIndex, uint32 LockedSpawnerKey,
+		int32 AuthorityFaultMode)
+	{
+		if (FM && FM->GetRunState() != m8authority::RunState::Playing)
+		{
+			return { { FString::Printf(TEXT("OBJECTIVE: %s"), RunStateName(FM->GetRunState())), kDim } };
+		}
+		if (FM && FM->IsRoomContractPending())
+		{
+			return { { TEXT("OBJECTIVE: CHOOSE ROOM CONTRACT [1/2]"), kAccent } };
+		}
+		if (LC && LC->IsRewardPending())
+		{
+			return { { TEXT("OBJECTIVE: CHOOSE REWARD [1/2/3]"), kAccent } };
+		}
+		ADungeonSpawner* Spawner =
+			(AuthorityFaultMode == 5 || AuthorityFaultMode == 6)
+			? nullptr : FindFreshObjectiveSpawner(World, FM);
+		if (!Pawn || !Spawner)
+		{
+			return { { FM && FM->IsRunActive()
+				? TEXT("OBJECTIVE: NO CURRENT TARGET") : TEXT("OBJECTIVE: STARTING RUN"), kDim } };
+		}
+
+		if (FM->IsFloorObjectiveComplete())
+		{
+			ADungeonStairs* BoundStairs = nullptr;
+			int32 Matches = 0;
+			const FVector Expected = Spawner->GetFarthestRoomCenterWorld();
+			for (TActorIterator<ADungeonStairs> It(World); It; ++It)
+			{
+				ADungeonStairs* Candidate = *It;
+				if (IsValid(Candidate) && !Candidate->IsActorBeingDestroyed()
+					&& FVector::DistSquared2D(Candidate->GetActorLocation(), Expected) <= 1.0f)
+				{
+					BoundStairs = Candidate;
+					++Matches;
+				}
+			}
+			if (Matches == 1 && BoundStairs)
+			{
+				const float Metres = FVector::Dist2D(Pawn->GetActorLocation(), BoundStairs->GetActorLocation()) / 100.0f;
+				return MakeObjective(FString::Printf(TEXT("OBJECTIVE: STAIRS %.1fm"), Metres),
+					BoundStairs, BoundStairs->GetActorLocation(), FM, Spawner);
+			}
+			return { { TEXT("OBJECTIVE: EXIT READY - STAIRS UNAVAILABLE"), kDim } };
+		}
+
+		const bool bPrioritizeOrdinary = Spawner->HasFinaleInitialized()
+			&& Spawner->GetLivingOrdinaryEnemyCount() > 0;
+		if (Spawner->HasFinaleInitialized() && !bPrioritizeOrdinary)
+		{
+			ADungeonEnemy* Warden = Spawner->GetWarden();
+			if (IsValid(Warden) && !Warden->IsActorBeingDestroyed() && Warden->IsActiveThreat()
+				&& Warden->GetOwningSpawner() == Spawner)
+			{
+				const float Metres = FVector::Dist2D(
+					Pawn->GetActorLocation(), Warden->GetActorLocation()) / 100.0f;
+				return MakeObjective(FString::Printf(TEXT("OBJECTIVE: WARDEN %.1fm"), Metres),
+					Warden, Warden->GetActorLocation(), FM, Spawner);
+			}
+		}
+		TSet<int32> OrdinaryRooms;
+		if (bPrioritizeOrdinary)
+		{
+			for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+			{
+				ADungeonEnemy* Enemy = *It;
+				if (IsValid(Enemy) && !Enemy->IsActorBeingDestroyed() && Enemy->IsActiveThreat()
+					&& Enemy->GetOwningSpawner() == Spawner && !Enemy->IsWarden())
+				{
+					OrdinaryRooms.Add(Enemy->GetRoomIndex());
+				}
+			}
+		}
+
+		int32 ObjectiveRoom = INDEX_NONE;
+		if (bPrioritizeOrdinary)
+		{
+			// Keep a live ordinary target stable once acquired. On acquisition, ignore room-risk
+			// labels and choose the shortest complete capsule-agent path; unreachable rooms are
+			// excluded instead of being selected and producing a wall-facing blocked arrow.
+			ADungeonEnemy* LockedOrdinary = Cast<ADungeonEnemy>(LockedTarget);
+			if (LockedOrdinary && IsValid(LockedOrdinary) && !LockedOrdinary->IsActorBeingDestroyed()
+				&& LockedOrdinary->IsActiveThreat() && !LockedOrdinary->IsWarden()
+				&& LockedOrdinary->GetOwningSpawner() == Spawner
+				&& LockedRunSeed == FM->GetRunSeed() && LockedFloorIndex == FM->GetFloorIndex()
+				&& LockedSpawnerKey == Spawner->GetUniqueID()
+				&& OrdinaryRooms.Contains(LockedOrdinary->GetRoomIndex()))
+			{
+				ObjectiveRoom = LockedOrdinary->GetRoomIndex();
+			}
+			else
+			{
+				double BestPathLength = TNumericLimits<double>::Max();
+				for (int32 Room : OrdinaryRooms)
+				{
+					double PathLength = 0.0;
+					if (Spawner->GetAliveInRoom(Room) <= 0
+						|| !TryMeasureReachablePath(
+							World, Pawn, Spawner, Spawner->GetRoomCenterWorld(Room), PathLength))
+					{
+						continue;
+					}
+					if (ObjectiveRoom == INDEX_NONE || PathLength < BestPathLength
+						|| (FMath::IsNearlyEqual(PathLength, BestPathLength) && Room < ObjectiveRoom))
+					{
+						ObjectiveRoom = Room;
+						BestPathLength = PathLength;
+					}
+				}
+			}
+		}
+		else
+		{
+			// Before the finale, a chosen contract room remains the first tactical commitment;
+			// otherwise preserve the established room-risk then distance ordering.
+			ObjectiveRoom = FM->GetSelectedContractRoom();
+			if (ObjectiveRoom < 0 || Spawner->GetAliveInRoom(ObjectiveRoom) <= 0)
+			{
+				ObjectiveRoom = INDEX_NONE;
+				int32 BestRisk = TNumericLimits<int32>::Max();
+				float BestDistance = TNumericLimits<float>::Max();
+				const TArray<int32>& Roles = Spawner->GetCachedRoomRoles();
+				for (int32 Room = 0; Room < Spawner->GetRoomCount(); ++Room)
+				{
+					if (Spawner->GetAliveInRoom(Room) <= 0 || !Roles.IsValidIndex(Room))
+					{
+						continue;
+					}
+					const int32 Risk = m8objective::room_risk_priority(Roles[Room]);
+					const float Distance = FVector::DistSquared2D(
+						Pawn->GetActorLocation(), Spawner->GetRoomCenterWorld(Room));
+					if (ObjectiveRoom == INDEX_NONE || Risk < BestRisk
+						|| (Risk == BestRisk && (Distance < BestDistance
+							|| (FMath::IsNearlyEqual(Distance, BestDistance) && Room < ObjectiveRoom))))
+					{
+						ObjectiveRoom = Room;
+						BestRisk = Risk;
+						BestDistance = Distance;
+					}
+				}
+			}
+		}
+
+		ADungeonEnemy* BestEnemy = nullptr;
+		ADungeonEnemy* LockedEnemy = nullptr;
+		m8objective::CandidateKey BestKey;
+		for (TActorIterator<ADungeonEnemy> It(World); It; ++It)
+		{
+			ADungeonEnemy* Enemy = *It;
+			if (!IsValid(Enemy) || Enemy->IsActorBeingDestroyed() || !Enemy->IsActiveThreat()
+				|| Enemy->GetOwningSpawner() != Spawner || Enemy->GetRoomIndex() != ObjectiveRoom
+				|| (bPrioritizeOrdinary && Enemy->IsWarden()))
+			{
+				continue;
+			}
+			const int32 Ordinal = Enemy->GetSpawnOrdinal();
+			const m8objective::CandidateKey Key{
+				static_cast<double>(FVector::DistSquared2D(Pawn->GetActorLocation(), Enemy->GetActorLocation())),
+				Ordinal >= 0 ? static_cast<uint32>(Ordinal) : 0u, Enemy->GetUniqueID(), Ordinal >= 0 };
+			if (!BestEnemy || m8objective::candidate_less(Key, BestKey))
+			{
+				BestEnemy = Enemy;
+				BestKey = Key;
+			}
+			if (Enemy == LockedTarget && LockedRunSeed == FM->GetRunSeed()
+				&& LockedFloorIndex == FM->GetFloorIndex() && LockedSpawnerKey == Spawner->GetUniqueID())
+			{
+				LockedEnemy = Enemy;
+			}
+		}
+
+		if (ObjectiveRoom != INDEX_NONE)
+		{
+			const FVector RoomCenter = Spawner->GetRoomCenterWorld(ObjectiveRoom);
+			const float RoomMetres = FVector::Dist2D(Pawn->GetActorLocation(), RoomCenter) / 100.0f;
+			ADungeonEnemy* SelectedEnemy = LockedEnemy ? LockedEnemy : BestEnemy;
+			const float EnemyMetres = SelectedEnemy
+				? FVector::Dist2D(Pawn->GetActorLocation(), SelectedEnemy->GetActorLocation()) / 100.0f : BIG_NUMBER;
+			const bool bLockedNearby = SelectedEnemy == LockedEnemy && EnemyMetres <= kRouteThreatHoldRangeCm / 100.0f;
+			const bool bAcquireNearby = SelectedEnemy && EnemyMetres <= kRouteThreatAcquireRangeCm / 100.0f;
+			if ((bLockedNearby || bAcquireNearby || RoomMetres <= 4.5f) && SelectedEnemy)
+			{
+				return MakeObjective(FString::Printf(TEXT("OBJECTIVE: R%d %s %.1fm"), ObjectiveRoom,
+					SelectedEnemy->GetArchetypeDisplayName(), EnemyMetres), SelectedEnemy,
+					SelectedEnemy->GetActorLocation(), FM, Spawner);
+			}
+			uint32 RoomKey = (Spawner->GetUniqueID() * 16777619u) ^ static_cast<uint32>(ObjectiveRoom + 1);
+			if (RoomKey == 0) { RoomKey = 1; }
+			const bool bContractRoom = ObjectiveRoom == FM->GetSelectedContractRoom();
+			const FString RoomText = bContractRoom
+				? FString::Printf(TEXT("OBJECTIVE: CONTRACT ROOM R%d %.1fm"), ObjectiveRoom, RoomMetres)
+				: FString::Printf(TEXT("OBJECTIVE: ROOM R%d %.1fm"), ObjectiveRoom, RoomMetres);
+			AActor* RoomLockTarget = Spawner;
+			if (bPrioritizeOrdinary && BestEnemy)
+			{
+				RoomLockTarget = BestEnemy;
+			}
+			return MakeObjective(RoomText, RoomLockTarget, RoomCenter, FM, Spawner, RoomKey);
+		}
+
+		return { { TEXT("OBJECTIVE: NO CURRENT TARGET"), kDim } };
 	}
 
 	// Nearest room by 2D distance from the pawn to each room center. Uses the spawner's own room
@@ -163,6 +572,356 @@ namespace
 	}
 }
 
+void AUegameHUD::InvalidateObjectiveRoute()
+{
+	ObjectiveRouteWaypoint = FVector::ZeroVector;
+	ObjectiveRouteRunSeed = 0;
+	ObjectiveRouteTargetKey = 0;
+	ObjectiveRoutePawnKey = 0;
+	ObjectiveRouteFloorIndex = INDEX_NONE;
+	ObjectiveRouteStatus = EObjectiveRouteStatus::None;
+	ObjectiveRouteLastResult = 0;
+	ObjectiveRouteSource = 0;
+}
+
+void AUegameHUD::InvalidateObjectiveTarget()
+{
+	ObjectiveTargetLock.Reset();
+	ObjectiveTargetLockRunSeed = 0;
+	ObjectiveTargetLockSpawnerKey = 0;
+	ObjectiveTargetLockFloorIndex = INDEX_NONE;
+	bObjectiveRouteDeferQueryOnce = false;
+	InvalidateObjectiveRoute();
+}
+
+FString AUegameHUD::ResolveObjectiveRouteCue(
+	UWorld* World, APawn* Pawn, AActor* Target, uint32 TargetKey,
+	uint64 RunSeed, int32 FloorIndex, const FVector& TargetLocation)
+{
+	if (!World || !IsValid(Pawn) || Pawn->IsActorBeingDestroyed()
+		|| !IsValid(Target) || Target->IsActorBeingDestroyed())
+	{
+		InvalidateObjectiveRoute();
+		return TEXT("ROUTE BLOCKED");
+	}
+
+	const uint32 PawnKey = Pawn->GetUniqueID();
+	const bool bIdentityChanged = ObjectiveRouteTargetKey != TargetKey
+		|| ObjectiveRoutePawnKey != PawnKey || ObjectiveRouteRunSeed != RunSeed
+		|| ObjectiveRouteFloorIndex != FloorIndex;
+	if (bIdentityChanged)
+	{
+		const uint32 OldTargetKey = ObjectiveRouteTargetKey;
+		const uint32 OldPawnKey = ObjectiveRoutePawnKey;
+		const uint64 OldRunSeed = ObjectiveRouteRunSeed;
+		const int32 OldFloorIndex = ObjectiveRouteFloorIndex;
+		InvalidateObjectiveRoute();
+		ObjectiveRouteTargetKey = TargetKey;
+		ObjectiveRoutePawnKey = PawnKey;
+		ObjectiveRouteRunSeed = RunSeed;
+		ObjectiveRouteFloorIndex = FloorIndex;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::Updating;
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Display,
+			TEXT("[ObjectiveRouteInvalidated] reason=route-identity-change oldTargetKey=%u newTargetKey=%u oldPawnKey=%u newPawnKey=%u oldRunSeed=%llu newRunSeed=%llu oldFloor=%d newFloor=%d arrow=false stale=false"),
+			OldTargetKey, TargetKey, OldPawnKey, PawnKey,
+			static_cast<unsigned long long>(OldRunSeed), static_cast<unsigned long long>(RunSeed),
+			OldFloorIndex, FloorIndex);
+#endif
+	}
+	if (bObjectiveRouteDeferQueryOnce)
+	{
+		bObjectiveRouteDeferQueryOnce = false;
+		ObjectiveRouteWaypoint = FVector::ZeroVector;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::Updating;
+		return TEXT("ROUTE UPDATING");
+	}
+
+	// A combat objective is reached at attack range, not at the enemy capsule center. Continuing
+	// to point through a body produces wall-like shoving and teaches the wrong player action.
+	if (Cast<ADungeonEnemy>(Target)
+		&& FVector::Dist2D(Pawn->GetActorLocation(), TargetLocation) <= 220.0f)
+	{
+		ObjectiveRouteWaypoint = FVector::ZeroVector;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::None;
+		ObjectiveRouteLastResult = 0;
+		ObjectiveRouteSource = 0;
+		return TEXT("IN RANGE - ATTACK [F]");
+	}
+
+	const double Now = FPlatformTime::Seconds();
+	if (ObjectiveRouteQueryTimestampCount > 0 && Now < ObjectiveRouteLastQuerySeconds)
+	{
+		ObjectiveRouteQueryTimestampCount = 0;
+		ObjectiveRouteLastQuerySeconds = -1.0;
+	}
+	std::vector<double> PriorTimestamps;
+	PriorTimestamps.reserve(static_cast<std::size_t>(ObjectiveRouteQueryTimestampCount));
+	for (int32 Index = 0; Index < ObjectiveRouteQueryTimestampCount; ++Index)
+	{
+		PriorTimestamps.push_back(ObjectiveRouteQueryTimestamps[Index]);
+	}
+	if (!m8objective::route_query_allowed(Now, PriorTimestamps))
+	{
+		if (ObjectiveRouteStatus == EObjectiveRouteStatus::Ready)
+		{
+			return FString::Printf(TEXT("ROUTE %s"),
+				*ObjectiveDirection(ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController()));
+		}
+		return ObjectiveRouteStatus == EObjectiveRouteStatus::Blocked
+			? TEXT("ROUTE BLOCKED") : TEXT("ROUTE UPDATING");
+	}
+	if (ObjectiveRouteQueryTimestampCount == static_cast<int32>(m8objective::kRouteQueryMaximumPerSecond))
+	{
+		for (int32 Index = 1; Index < ObjectiveRouteQueryTimestampCount; ++Index)
+		{
+			ObjectiveRouteQueryTimestamps[Index - 1] = ObjectiveRouteQueryTimestamps[Index];
+		}
+		--ObjectiveRouteQueryTimestampCount;
+	}
+	ObjectiveRouteQueryTimestamps[ObjectiveRouteQueryTimestampCount++] = Now;
+	ObjectiveRouteLastQuerySeconds = Now;
+	++ObjectiveRouteQuerySerial;
+
+	auto FailRoute = [this, Now, TargetKey, RunSeed, FloorIndex, Pawn](const TCHAR* Result, uint8 ResultCode,
+		const ANavigationData* NavData, const FNavAgentProperties& AgentProps,
+		const FVector& Start, const FVector& End, int32 PointCount, bool bPartial,
+		double QueryStarted) -> FString
+	{
+		ObjectiveRouteLastQueryDurationMs = (FPlatformTime::Seconds() - QueryStarted) * 1000.0;
+		ObjectiveRouteWaypoint = FVector::ZeroVector;
+		ObjectiveRouteStatus = EObjectiveRouteStatus::Blocked;
+		ObjectiveRouteLastResult = ResultCode;
+		ObjectiveRouteSource = 0;
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Display,
+			TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=%s source=NONE arrow=false stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) points=%d partial=%s durationMs=%.3f"),
+			static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
+			static_cast<unsigned long long>(RunSeed), FloorIndex, Result,
+			NavData ? *NavData->GetName() : TEXT("NONE"),
+			NavData ? *NavData->GetClass()->GetName() : TEXT("NONE"),
+			AgentProps.AgentRadius, AgentProps.AgentHeight,
+			Start.X, Start.Y, Start.Z, End.X, End.Y, End.Z,
+			Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, Pawn->GetActorLocation().Z,
+			PointCount, bPartial ? TEXT("true") : TEXT("false"), ObjectiveRouteLastQueryDurationMs);
+#endif
+		return TEXT("ROUTE BLOCKED");
+	};
+
+	const double QueryStarted = FPlatformTime::Seconds();
+	const FNavAgentProperties& AgentProps = Pawn->GetNavAgentPropertiesRef();
+	UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	const ANavigationData* NavData = NavSystem
+		? NavSystem->GetNavDataForProps(AgentProps, Pawn->GetActorLocation()) : nullptr;
+	if (!NavSystem || !NavData)
+	{
+		return FailRoute(TEXT("NO_MATCHING_NAVDATA"), 1, NavData, AgentProps,
+			Pawn->GetActorLocation(), TargetLocation, 0, false, QueryStarted);
+	}
+
+	const float Radius = FMath::Max(AgentProps.AgentRadius, 35.0f);
+	const float Height = FMath::Max(AgentProps.AgentHeight, 88.0f);
+	const FVector ProjectionExtent(FMath::Max(Radius * 2.0f, 100.0f),
+		FMath::Max(Radius * 2.0f, 100.0f), FMath::Max(Height, 200.0f));
+	FNavLocation ProjectedStart;
+	FNavLocation ProjectedEnd;
+	bool bStartProjected = NavSystem->ProjectPointToNavigation(
+		Pawn->GetActorLocation(), ProjectedStart, ProjectionExtent, NavData);
+	bool bEndProjected = NavSystem->ProjectPointToNavigation(
+		TargetLocation, ProjectedEnd, ProjectionExtent, NavData);
+#if !UE_BUILD_SHIPPING
+	if (ObjectiveRouteFaultModeForTests == 1) { bStartProjected = false; }
+	if (ObjectiveRouteFaultModeForTests == 2) { bEndProjected = false; }
+#endif
+	if (!bStartProjected)
+	{
+		return FailRoute(TEXT("START_PROJECTION_FAILED"), 2, NavData, AgentProps,
+			Pawn->GetActorLocation(), TargetLocation, 0, false, QueryStarted);
+	}
+	if (!bEndProjected)
+	{
+		return FailRoute(TEXT("END_PROJECTION_FAILED"), 3, NavData, AgentProps,
+			ProjectedStart.Location, TargetLocation, 0, false, QueryStarted);
+	}
+
+	FPathFindingQuery Query(Pawn, *NavData, ProjectedStart.Location, ProjectedEnd.Location);
+	Query.SetAllowPartialPaths(false);
+	FPathFindingResult PathResult = NavSystem->FindPathSync(Query);
+	ENavigationQueryResult::Type QueryResult = PathResult.Result;
+	bool bForcedPathFailure = false;
+#if !UE_BUILD_SHIPPING
+	if (ObjectiveRouteFaultModeForTests == 3)
+	{
+		QueryResult = ENavigationQueryResult::Fail;
+		bForcedPathFailure = true;
+	}
+	if (ObjectiveRouteFaultModeForTests == 7)
+	{
+		QueryResult = ENavigationQueryResult::Invalid;
+	}
+	if (ObjectiveRouteFaultModeForTests == 8)
+	{
+		QueryResult = ENavigationQueryResult::Error;
+	}
+#endif
+	bool bSuccessful = QueryResult == ENavigationQueryResult::Success
+		&& PathResult.Path.IsValid();
+	bool bPartial = bSuccessful && PathResult.IsPartial();
+	int32 PointCount = bSuccessful ? PathResult.Path->GetPathPoints().Num() : 0;
+#if !UE_BUILD_SHIPPING
+	if (ObjectiveRouteFaultModeForTests == 4) { bPartial = true; }
+#endif
+	if (!bSuccessful)
+	{
+		if (QueryResult == ENavigationQueryResult::Fail && !bForcedPathFailure)
+		{
+			ADungeonSpawner* Spawner = FindFreshObjectiveSpawner(
+				World, UUegameFloorManager::Get(World));
+			const FObjectiveGridRoute GridRoute = Spawner
+				? Spawner->ResolveObjectiveGridRoute(
+					Pawn->GetActorLocation(), TargetLocation, AgentProps.AgentRadius)
+				: FObjectiveGridRoute{};
+#if !UE_BUILD_SHIPPING
+			UE_LOG(LogTemp, Display,
+				TEXT("[ObjectiveGridRoute] serial=%llu result=%s builtHash=0x%llx pathCells=%d pawn=(%.1f,%.1f,%.1f) target=(%.1f,%.1f,%.1f) waypoint=(%.1f,%.1f,%.1f) radius=%.1f"),
+				static_cast<unsigned long long>(ObjectiveRouteQuerySerial),
+				GridRouteResultName(GridRoute.Result),
+				static_cast<unsigned long long>(GridRoute.BuiltPlanHash),
+				GridRoute.PathCellCount,
+				Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, Pawn->GetActorLocation().Z,
+				TargetLocation.X, TargetLocation.Y, TargetLocation.Z,
+				GridRoute.Waypoint.X, GridRoute.Waypoint.Y, GridRoute.Waypoint.Z,
+				FMath::Max(AgentProps.AgentRadius, 35.0f));
+#endif
+			if (GridRoute.IsReady())
+			{
+				ObjectiveRouteWaypoint = GridRoute.Waypoint;
+				ObjectiveRouteStatus = EObjectiveRouteStatus::Ready;
+				ObjectiveRouteLastResult = 8;
+				ObjectiveRouteSource = 2;
+				ObjectiveRouteLastQueryDurationMs =
+					(FPlatformTime::Seconds() - QueryStarted) * 1000.0;
+				const FString Direction = ObjectiveDirection(
+					ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController());
+#if !UE_BUILD_SHIPPING
+				UE_LOG(LogTemp, Display,
+					TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=GRID_READY source=GRID arrow=true stale=false builtHash=0x%llx pathCells=%d waypoint=(%.1f,%.1f,%.1f) direction=%s durationMs=%.3f"),
+					static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
+					static_cast<unsigned long long>(RunSeed), FloorIndex,
+					static_cast<unsigned long long>(GridRoute.BuiltPlanHash),
+					GridRoute.PathCellCount,
+					ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
+					*Direction, ObjectiveRouteLastQueryDurationMs);
+#endif
+				return FString::Printf(TEXT("ROUTE %s"), *Direction);
+			}
+			return FailRoute(
+				GridRouteResultName(GridRoute.Result),
+				static_cast<uint8>(9 + static_cast<uint8>(GridRoute.Result)),
+				NavData, AgentProps, ProjectedStart.Location, ProjectedEnd.Location,
+				GridRoute.PathCellCount, false, QueryStarted);
+		}
+		return FailRoute(
+			bForcedPathFailure ? TEXT("PATH_INVALID") : NavigationQueryFailureName(QueryResult),
+			QueryResult == ENavigationQueryResult::Invalid ? 17
+				: QueryResult == ENavigationQueryResult::Error ? 18 : 4,
+			NavData, AgentProps,
+			ProjectedStart.Location, ProjectedEnd.Location, PointCount, bPartial, QueryStarted);
+	}
+	if (bPartial)
+	{
+		return FailRoute(TEXT("PATH_PARTIAL_REJECTED"), 5, NavData, AgentProps,
+			ProjectedStart.Location, ProjectedEnd.Location, PointCount, true, QueryStarted);
+	}
+	if (PointCount < 2)
+	{
+		return FailRoute(TEXT("PATH_TOO_SHORT"), 6, NavData, AgentProps,
+			ProjectedStart.Location, ProjectedEnd.Location, PointCount, false, QueryStarted);
+	}
+
+	const TArray<FNavPathPoint>& PathPoints = PathResult.Path->GetPathPoints();
+	std::vector<m8objective::Vec2> OrderedPoints;
+	OrderedPoints.reserve(static_cast<std::size_t>(PointCount));
+	for (const FNavPathPoint& Point : PathPoints)
+	{
+		OrderedPoints.push_back({ Point.Location.X, Point.Location.Y });
+	}
+	const m8objective::WaypointChoice Choice = m8objective::select_route_waypoint(
+		OrderedPoints, { Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y },
+		{ ProjectedEnd.Location.X, ProjectedEnd.Location.Y }, 150.0);
+	ObjectiveRouteWaypoint = Choice.used_target_fallback
+		? ProjectedEnd.Location : PathPoints[static_cast<int32>(Choice.path_index)].Location;
+	ObjectiveRouteStatus = EObjectiveRouteStatus::Ready;
+	ObjectiveRouteLastResult = 7;
+	ObjectiveRouteSource = 1;
+	ObjectiveRouteLastQueryDurationMs = (FPlatformTime::Seconds() - QueryStarted) * 1000.0;
+	const FString Direction = ObjectiveDirection(ObjectiveRouteWaypoint, Pawn, GetOwningPlayerController());
+	const float ControlYaw = GetOwningPlayerController()
+		? GetOwningPlayerController()->GetControlRotation().Yaw : Pawn->GetActorRotation().Yaw;
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRouteQuery] serial=%llu timestamp=%.6f targetKey=%u runSeed=%llu floor=%d result=READY source=RECAST arrow=true stale=false navData=%s navClass=%s agentRadius=%.1f agentHeight=%.1f start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pawn=(%.1f,%.1f,%.1f) waypoint=(%.1f,%.1f,%.1f) controlYaw=%.1f points=%d partial=false fallback=%s direction=%s durationMs=%.3f"),
+		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), Now, TargetKey,
+		static_cast<unsigned long long>(RunSeed), FloorIndex,
+		*NavData->GetName(), *NavData->GetClass()->GetName(), AgentProps.AgentRadius, AgentProps.AgentHeight,
+		ProjectedStart.Location.X, ProjectedStart.Location.Y, ProjectedStart.Location.Z,
+		ProjectedEnd.Location.X, ProjectedEnd.Location.Y, ProjectedEnd.Location.Z,
+		Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, Pawn->GetActorLocation().Z,
+		ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
+		ControlYaw, PointCount, Choice.used_target_fallback ? TEXT("true") : TEXT("false"),
+		*Direction, ObjectiveRouteLastQueryDurationMs);
+#endif
+	return FString::Printf(TEXT("ROUTE %s"), *Direction);
+}
+
+#if !UE_BUILD_SHIPPING
+void AUegameHUD::SetObjectiveRouteFaultModeForTests(int32 Mode)
+{
+	ObjectiveRouteFaultModeForTests = FMath::Clamp(Mode, 0, 8);
+	InvalidateObjectiveRoute();
+	bObjectiveRouteDeferQueryOnce = true;
+	UE_LOG(LogTemp, Display, TEXT("[ObjectiveRouteTest] faultMode=%d serial=%llu arrow=false"),
+		ObjectiveRouteFaultModeForTests, static_cast<unsigned long long>(ObjectiveRouteQuerySerial));
+}
+
+void AUegameHUD::LogObjectiveRouteStatusForTests() const
+{
+	const TCHAR* Status = ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("READY")
+		: ObjectiveRouteStatus == EObjectiveRouteStatus::Blocked ? TEXT("BLOCKED")
+		: ObjectiveRouteStatus == EObjectiveRouteStatus::Updating ? TEXT("UPDATING") : TEXT("NONE");
+	const TCHAR* Source = ObjectiveRouteSource == 1 ? TEXT("RECAST")
+		: ObjectiveRouteSource == 2 ? TEXT("GRID") : TEXT("NONE");
+	const ADungeonEnemy* TargetEnemy = Cast<ADungeonEnemy>(ObjectiveTargetLock.Get());
+	const ADungeonSpawner* TargetSpawner = TargetEnemy ? TargetEnemy->GetOwningSpawner() : nullptr;
+	const TCHAR* TargetKind = TargetEnemy
+		? (TargetEnemy->IsWarden() ? TEXT("warden") : TEXT("ordinary"))
+		: (ObjectiveTargetLock.IsValid() ? TEXT("other") : TEXT("none"));
+	UE_LOG(LogTemp, Display,
+		TEXT("[ObjectiveRouteStatus] status=%s source=%s arrow=%s serial=%llu result=%u targetKey=%u pawnKey=%u runSeed=%llu floor=%d waypoint=(%.1f,%.1f,%.1f) faultMode=%d targetKind=%s targetRoom=%d ordinaryAlive=%d"),
+		Status, Source, ObjectiveRouteStatus == EObjectiveRouteStatus::Ready ? TEXT("true") : TEXT("false"),
+		static_cast<unsigned long long>(ObjectiveRouteQuerySerial), ObjectiveRouteLastResult,
+		ObjectiveRouteTargetKey, ObjectiveRoutePawnKey,
+		static_cast<unsigned long long>(ObjectiveRouteRunSeed), ObjectiveRouteFloorIndex,
+		ObjectiveRouteWaypoint.X, ObjectiveRouteWaypoint.Y, ObjectiveRouteWaypoint.Z,
+		ObjectiveRouteFaultModeForTests, TargetKind,
+		TargetEnemy ? TargetEnemy->GetRoomIndex() : INDEX_NONE,
+		TargetSpawner ? TargetSpawner->GetLivingOrdinaryEnemyCount() : INDEX_NONE);
+}
+
+bool AUegameHUD::TryGetObjectiveRouteWaypointForTests(FVector& OutWaypoint) const
+{
+	if (ObjectiveRouteStatus != EObjectiveRouteStatus::Ready
+		|| ObjectiveRouteWaypoint.IsNearlyZero())
+	{
+		OutWaypoint = FVector::ZeroVector;
+		return false;
+	}
+
+	OutWaypoint = ObjectiveRouteWaypoint;
+	return true;
+}
+#endif
+
 void AUegameHUD::DrawHUD()
 {
 	Super::DrawHUD();
@@ -180,66 +939,172 @@ void AUegameHUD::DrawHUD()
 
 	UWorld* World = GetWorld();
 	APlayerController* PC = GetOwningPlayerController();
+	AuegamePlayerController* ProductPC = Cast<AuegamePlayerController>(PC);
 	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
 	ULoadoutComponent* LC = Pawn ? Pawn->FindComponentByClass<ULoadoutComponent>() : nullptr;
+	UBuildSynergyComponent* Synergy = Pawn
+		? Pawn->FindComponentByClass<UBuildSynergyComponent>() : nullptr;
+	UPresentationFeedbackComponent* Presentation = Pawn
+		? Pawn->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr;
 	UHealthComponent* HP = Pawn ? Pawn->FindComponentByClass<UHealthComponent>() : nullptr;
 	UUegameFloorManager* FM = UUegameFloorManager::Get(World);
 	ADungeonSpawner* Spawner = FindSpawner(World);
+	const bool bShowDiagnostics = CVarShowDiagnostics.GetValueOnGameThread() != 0;
+	if (Presentation
+		&& OnboardingPresentationGeneration != Presentation->GetPresentationGeneration())
+	{
+		OnboardingPresentationGeneration = Presentation->GetPresentationGeneration();
+		OnboardingStartedAtGameSeconds = World ? World->GetTimeSeconds() : 0.0;
+	}
 
-	// ---------------- Left panel: player / build / reward offer ----------------
+	// Shipping-path combat feedback: Canvas primitives are normal HUD rendering, not debug draw.
+	// The component retains only event-derived expiry and never supplies gameplay truth.
+	if (Presentation)
+	{
+		const float CenterX = Canvas->SizeX * 0.5f;
+		const float CenterY = Canvas->SizeY * 0.5f;
+		const float SwingAlpha = Presentation->GetSwingAlpha();
+		if (SwingAlpha > 0.0f)
+		{
+			const FLinearColor SwingColor = Presentation->WasLastSwingKill()
+				? FLinearColor(1.0f, 0.2f, 0.12f, SwingAlpha)
+				: FLinearColor(1.0f, 0.84f, 0.20f, SwingAlpha);
+			const float Reach = 52.0f * Scale;
+			DrawLine(CenterX - Reach, CenterY + Reach * 0.55f,
+				CenterX + Reach, CenterY - Reach * 0.55f, SwingColor, 4.0f * Scale);
+			DrawLine(CenterX - Reach * 0.72f, CenterY + Reach * 0.82f,
+				CenterX + Reach * 0.72f, CenterY - Reach * 0.82f, SwingColor, 2.0f * Scale);
+		}
+		const float HitAlpha = Presentation->GetHitMarkerAlpha();
+		if (HitAlpha > 0.0f)
+		{
+			const FLinearColor HitColor = Presentation->WasLastSwingKill()
+				? FLinearColor(1.0f, 0.15f, 0.1f, HitAlpha)
+				: FLinearColor(1.0f, 1.0f, 1.0f, HitAlpha);
+			const float Inner = 7.0f * Scale;
+			const float Outer = 18.0f * Scale;
+			DrawLine(CenterX - Outer, CenterY - Outer, CenterX - Inner, CenterY - Inner,
+				HitColor, 3.0f * Scale);
+			DrawLine(CenterX + Inner, CenterY + Inner, CenterX + Outer, CenterY + Outer,
+				HitColor, 3.0f * Scale);
+			DrawLine(CenterX + Inner, CenterY - Inner, CenterX + Outer, CenterY - Outer,
+				HitColor, 3.0f * Scale);
+			DrawLine(CenterX - Outer, CenterY + Outer, CenterX - Inner, CenterY + Inner,
+				HitColor, 3.0f * Scale);
+		}
+	}
+
+	// ---------------- Left panel: player / build ----------------
 	TArray<FHudLine> Left;
 	Left.Add({ TEXT("PLAYER / BUILD"), kHeader });
 
 	if (HP)
 	{
-		Left.Add({ FString::Printf(TEXT("HP        %.0f / %.0f"), HP->GetHP(), HP->GetMaxHP()), kBody });
+		Left.Add({ FString::Printf(TEXT("HP  %.0f / %.0f"), HP->GetHP(), HP->GetMaxHP()), kBody });
 	}
 	if (LC && LC->HasResolvedStats())
 	{
 		const int32 AtkMs = LC->GetResolvedAttackMs();
 		const float Aps = (AtkMs > 0) ? (1000.0f / static_cast<float>(AtkMs)) : 0.0f;
-		Left.Add({ FString::Printf(TEXT("Damage    %d"), LC->GetResolvedDamage()), kBody });
-		Left.Add({ FString::Printf(TEXT("Attack    %d ms  (%.2f/s)"), AtkMs, Aps), kBody });
+		Left.Add({ FString::Printf(TEXT("Damage %d   Rate %.2f/s"), LC->GetResolvedDamage(), Aps), kBody });
 
 		const TArray<int32>& Picks = LC->GetChosenAffixIds();
 		if (Picks.Num() == 0)
 		{
-			Left.Add({ TEXT("Picks:    none yet"), kDim });
+			Left.Add({ TEXT("Build forming - choose rewards"), kDim });
 		}
 		else
 		{
-			FString P;
 			for (int32 Id : Picks)
 			{
-				P += FString::Printf(TEXT("%d(%s) "), Id, *LC->DescribeAffixById(Id));
-			}
-			Left.Add({ FString::Printf(TEXT("Picks:    %s"), *P.TrimStartAndEnd()), kBody });
-		}
-
-		if (LC->IsRewardPending())
-		{
-			Left.Add({ FString::Printf(TEXT("REWARD PENDING (floor %d) - press 1/2/3"), LC->GetFloorForOffer()), kAccent });
-			const TArray<int32>& Offer = LC->GetCurrentOfferIds();
-			for (int32 i = 0; i < Offer.Num(); ++i)
-			{
-				Left.Add({ FString::Printf(TEXT("   [%d] %s"), i + 1, *LC->DescribeAffixById(Offer[i])), kAccent });
+				Left.Add({ FString::Printf(TEXT("+ %s"), *LC->DescribeAffixById(Id)), kBody });
 			}
 		}
 	}
 	else
 	{
-		Left.Add({ TEXT("(loadout not initialized)"), kDim });
+		Left.Add({ TEXT("Build unavailable"), kDim });
+	}
+	if (Synergy)
+	{
+		const int32 E = Synergy->GetExecutionerRank();
+		const int32 T = Synergy->GetTempoRank();
+		const int32 B = Synergy->GetBulwarkRank();
+		if (E > 0)
+		{
+			Left.Add({ FString::Printf(TEXT("EXECUTIONER R%d  Finish <=40%% HP"), E), kBody });
+		}
+		if (T > 0)
+		{
+			Left.Add({ FString::Printf(TEXT("TEMPO R%d  Chain %d/%d"),
+				T, Synergy->GetTempoChain(), Synergy->GetTempoThreshold()),
+				Synergy->GetTempoChain() > 0 ? kAccent : kBody });
+		}
+		if (B > 0)
+		{
+			Left.Add({ Synergy->IsCounterReady()
+				? FString::Printf(TEXT("BULWARK R%d  COUNTER %.1fs"),
+					B, Synergy->GetCounterRemainingSeconds())
+				: FString::Printf(TEXT("BULWARK R%d  Take a hit, then counter"), B),
+				Synergy->IsCounterReady() ? kAccent : kBody });
+		}
+	}
+	if (FM && FM->IsRunActive())
+	{
+		Left.Add({ FString::Printf(TEXT("Resolve %d / 2"), FM->GetResolveTokens()),
+			FM->GetResolveTokens() > 0 ? kAccent : kDim });
 	}
 	DrawPanel(this, Font, 24.0f, 24.0f, Left, Scale);
 
 	// ---------------- Right panel: run / floor / room role / encounter tally ----------------
 	TArray<FHudLine> Right;
-	Right.Add({ TEXT("RUN / ENCOUNTER"), kHeader });
+	Right.Add({ FM && FM->IsRunActive()
+		? FString::Printf(TEXT("RUN / FLOOR %d"), FM->GetFloorIndex())
+		: TEXT("RUN"), kHeader });
 
 	if (FM && FM->IsRunActive())
 	{
-		Right.Add({ FString::Printf(TEXT("Floor %d    seed 0x%llx"),
-			FM->GetFloorIndex(), static_cast<unsigned long long>(FM->GetRunSeed())), kBody });
+		if (bShowDiagnostics)
+		{
+			Right.Add({ FString::Printf(TEXT("Seed 0x%llx"),
+				static_cast<unsigned long long>(FM->GetRunSeed())), kDim });
+			Right.Add({ FString::Printf(TEXT("State %s"), RunStateName(FM->GetRunState())), kDim });
+		}
+		if (FM->IsRoomContractPending())
+		{
+			Right.Add({ TEXT("Contract: choose [1/2]"), kAccent });
+		}
+		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Secure)
+		{
+			Right.Add({ FString::Printf(TEXT("Contract: SECURE R%d"), FM->GetSelectedContractRoom()), kBody });
+		}
+		else if (FM->GetRoomContractChoice() == EUegameRoomContractChoice::Challenge)
+		{
+			Right.Add({ FString::Printf(TEXT("Contract: CHALLENGE R%d"), FM->GetSelectedContractRoom()), kAccent });
+		}
+		Right.Add({ FString::Printf(TEXT("Rooms %d / %d cleared"),
+			FM->GetClearedCombatRooms(), FM->GetRequiredCombatRooms()), kBody });
+		const int32 RoomsRemaining = FMath::Max(
+			0, FM->GetRequiredCombatRooms() - FM->GetClearedCombatRooms());
+		if (FM->IsProgressionBlockedByExitSafety())
+		{
+			Right.Add({ TEXT("Exit: BLOCKED - safety check"), kAccent });
+		}
+		else if (FM->IsFloorObjectiveComplete())
+		{
+			Right.Add({ TEXT("Exit: READY"), kAccent });
+		}
+		else
+		{
+			Right.Add({ FString::Printf(TEXT("Exit: clear %d more room%s"),
+				RoomsRemaining, RoomsRemaining == 1 ? TEXT("") : TEXT("s")), kDim });
+		}
+		if (bShowDiagnostics)
+		{
+			Right.Add({ FString::Printf(TEXT("Total rooms %d  skipped %d  safe %s"),
+				FM->GetActualCombatRooms(), FM->GetAbandonedCombatRooms(),
+				FM->AreFloorExitThreatsWithdrawn() ? TEXT("YES") : TEXT("NO")), kDim });
+		}
 	}
 	else
 	{
@@ -275,10 +1140,30 @@ void AUegameHUD::DrawHUD()
 				Right.Add({ TEXT("Room role: (n/a)"), kDim });
 			}
 
-			const FIntVector T = Spawner->GetCachedTypeTally();
-			Right.Add({ FString::Printf(TEXT("Enemies    Grunt %d  Runner %d  Brute %d"), T.X, T.Y, T.Z), kBody });
-			Right.Add({ FString::Printf(TEXT("typeHash   0x%llx"),
-				static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+			Right.Add({ FString::Printf(TEXT("Threats %d"),
+				Spawner->GetLivingOrdinaryEnemyCount()), kBody });
+			if (bShowDiagnostics)
+			{
+				const FIntVector T = Spawner->GetCachedTypeTally();
+				Right.Add({ FString::Printf(TEXT("Initial G%d R%d B%d"), T.X, T.Y, T.Z), kDim });
+				Right.Add({ FString::Printf(TEXT("typeHash 0x%llx"),
+					static_cast<unsigned long long>(Spawner->GetCachedEnemyTypeHash())), kDim });
+			}
+			if (Spawner->HasFinaleInitialized())
+			{
+				if (const ADungeonEnemy* Warden = Spawner->GetWarden())
+				{
+					const bool bGuarded = Warden->GetWardenPhase() == EUegameWardenPhase::Guarded;
+					Right.Add({ FString::Printf(TEXT("WARDEN %s  %s %d/%d"),
+						WardenPhaseName(Warden->GetWardenPhase()),
+						bGuarded ? TEXT("Guard") : TEXT("HP"),
+						Warden->GetCombatPoolCurrent(), Warden->GetCombatPoolMax()), kAccent });
+				}
+				else if (Spawner->IsWardenDefeated())
+				{
+					Right.Add({ TEXT("WARDEN DEFEATED"), kAccent });
+				}
+			}
 		}
 	}
 	else
@@ -292,6 +1177,279 @@ void AUegameHUD::DrawHUD()
 	const float RightPanelW = RightContentW + 2.0f * (8.0f * Scale);
 	const float Rx = FMath::Max(24.0f, Canvas->SizeX - 24.0f - RightPanelW);
 	DrawPanel(this, Font, Rx, 24.0f, Right, Scale);
+
+	// ---------------- Objective: live target plus capsule-agent NavMesh waypoint ----------------
+	// The target is a read-only view of current gameplay state. Route certification comes only
+	// from the pawn's matching NavData and a non-partial path; any authority/query failure clears it.
+	TArray<FHudLine> Objective;
+	const bool bObjectivePawnValid = IsValid(Pawn) && !Pawn->IsActorBeingDestroyed()
+		&& (!HP || !HP->IsDead());
+	FObjectiveSelection ObjectiveSelection = SelectObjective(
+		World, bObjectivePawnValid ? Pawn : nullptr, LC, FM,
+		ObjectiveTargetLock.Get(), ObjectiveTargetLockRunSeed,
+		ObjectiveTargetLockFloorIndex, ObjectiveTargetLockSpawnerKey,
+#if !UE_BUILD_SHIPPING
+		ObjectiveRouteFaultModeForTests
+#else
+		0
+#endif
+	);
+	if (ObjectiveSelection.Target)
+	{
+		const bool bLockChanged = ObjectiveTargetLock.Get() != ObjectiveSelection.Target
+			|| ObjectiveTargetLockRunSeed != ObjectiveSelection.RunSeed
+			|| ObjectiveTargetLockFloorIndex != ObjectiveSelection.FloorIndex
+			|| ObjectiveTargetLockSpawnerKey != ObjectiveSelection.SpawnerKey;
+		if (bLockChanged)
+		{
+			const uint32 OldTargetKey = ObjectiveRouteTargetKey;
+			ObjectiveTargetLock = ObjectiveSelection.Target;
+			ObjectiveTargetLockRunSeed = ObjectiveSelection.RunSeed;
+			ObjectiveTargetLockFloorIndex = ObjectiveSelection.FloorIndex;
+			ObjectiveTargetLockSpawnerKey = ObjectiveSelection.SpawnerKey;
+			InvalidateObjectiveRoute();
+			bObjectiveRouteDeferQueryOnce = true;
+#if !UE_BUILD_SHIPPING
+			UE_LOG(LogTemp, Display,
+				TEXT("[ObjectiveRouteInvalidated] reason=identity-change oldTargetKey=%u newTargetKey=%u runSeed=%llu floor=%d arrow=false stale=false"),
+				OldTargetKey, ObjectiveSelection.TargetKey,
+				static_cast<unsigned long long>(ObjectiveSelection.RunSeed), ObjectiveSelection.FloorIndex);
+#endif
+		}
+		if (CVarShowObjectiveRoute.GetValueOnGameThread() != 0)
+		{
+			ObjectiveSelection.Line.Text += TEXT("  ");
+			ObjectiveSelection.Line.Text += ResolveObjectiveRouteCue(
+				World, Pawn, ObjectiveSelection.Target, ObjectiveSelection.TargetKey,
+				ObjectiveSelection.RunSeed, ObjectiveSelection.FloorIndex,
+				ObjectiveSelection.TargetLocation);
+		}
+		else
+		{
+			// A disabled route is a strict zero-query baseline, never a frozen arrow.
+			InvalidateObjectiveRoute();
+		}
+	}
+	else
+	{
+		const uint32 OldTargetKey = ObjectiveRouteTargetKey;
+		InvalidateObjectiveTarget();
+#if !UE_BUILD_SHIPPING
+		if (OldTargetKey != 0)
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[ObjectiveRouteInvalidated] reason=no-authoritative-target oldTargetKey=%u newTargetKey=0 arrow=false stale=false"),
+				OldTargetKey);
+		}
+#endif
+	}
+	Objective.Add(ObjectiveSelection.Line);
+	float ObjectiveW = 0.0f, ObjectiveLineH = 0.0f;
+	MeasurePanel(this, Font, Objective, Scale, ObjectiveW, ObjectiveLineH);
+	const float ObjectivePanelW = ObjectiveW + 16.0f * Scale;
+	const float ObjectivePanelH = ObjectiveLineH + 16.0f * Scale;
+	const float ObjectiveY = FMath::Max(24.0f, Canvas->SizeY - 24.0f - ObjectivePanelH);
+	DrawPanel(this, Font, FMath::Max(24.0f, (Canvas->SizeX - ObjectivePanelW) * 0.5f),
+		ObjectiveY, Objective, Scale);
+
+	// ---------------- Center: product shell plus authoritative pause/result flow ----------------
+	TArray<FHudLine> Center;
+	bool bDimSceneForModal = false;
+	bool bTitlePresentation = false;
+	bool bConfirmationPresentation = false;
+	// Confirmation must win over the title card: Enter/Space confirm the modal, and
+	// drawing BEGIN underneath would make an open quit/restart dialog look like a start prompt.
+	if (ProductPC && ProductPC->IsConfirmationVisible())
+	{
+		bDimSceneForModal = true;
+		bConfirmationPresentation = true;
+		Center.Add({ ProductPC->GetConfirmationTitle(), kAccent });
+		Center.Add({ ProductPC->GetConfirmationAction(), kBody });
+		Center.Add({ TEXT("ESC   CANCEL"), kDim });
+	}
+	else if (ProductPC && ProductPC->IsWelcomeVisible())
+	{
+		bDimSceneForModal = true;
+		bTitlePresentation = true;
+		Center.Add({ TEXT("WARDENFALL"), kAccent });
+		Center.Add({ TEXT("FORGE A BUILD. CLEAR THREE FLOORS. BREAK THE WARDEN."), kHeader });
+		Center.Add({ TEXT("ENTER / SPACE   BEGIN"), kBody });
+		Center.Add({ TEXT("WASD Move   Mouse Look   F Attack"), kDim });
+		Center.Add({ TEXT("Q   Quit to Desktop"), kDim });
+	}
+	else if (FM && FM->IsRunActive())
+	{
+		const m8authority::RunState RunState = FM->GetRunState();
+		const bool bResultVisible =
+			RunState == m8authority::RunState::Won
+			|| RunState == m8authority::RunState::Failed
+			|| RunState == m8authority::RunState::Error;
+		const int32 PickCount = LC ? LC->GetChosenAffixIds().Num() : 0;
+		const double ElapsedOnboardingSeconds = World
+			? static_cast<double>(World->GetTimeSeconds()) - OnboardingStartedAtGameSeconds
+			: -1.0;
+		const bool bOnboardingVisible = m8presentation::show_onboarding(
+			FM->GetFloorIndex(), PickCount, ElapsedOnboardingSeconds);
+		const m8presentation::Overlay Overlay = m8presentation::choose_overlay(
+			bResultVisible,
+			RunState == m8authority::RunState::Paused,
+			FM->IsRoomContractPending(),
+			LC && LC->IsRewardPending(),
+			bOnboardingVisible);
+
+		switch (Overlay)
+		{
+		case m8presentation::Overlay::Result:
+			bDimSceneForModal = true;
+			{
+				const int32 TotalSeconds = FMath::Max(0, FMath::RoundToInt(FM->GetRunElapsedSeconds()));
+				const FString TimeLine = FString::Printf(TEXT("TIME  %02d:%02d     ROOMS CLEARED  %d"),
+					TotalSeconds / 60, TotalSeconds % 60, FM->GetTotalClearedCombatRooms());
+				FString BuildLine(TEXT("BUILD  UNFORMED"));
+				if (Synergy)
+				{
+					TArray<FString> Identities;
+					if (Synergy->GetExecutionerRank() > 0)
+					{
+						Identities.Add(FString::Printf(TEXT("EXECUTIONER R%d"), Synergy->GetExecutionerRank()));
+					}
+					if (Synergy->GetTempoRank() > 0)
+					{
+						Identities.Add(FString::Printf(TEXT("TEMPO R%d"), Synergy->GetTempoRank()));
+					}
+					if (Synergy->GetBulwarkRank() > 0)
+					{
+						Identities.Add(FString::Printf(TEXT("BULWARK R%d"), Synergy->GetBulwarkRank()));
+					}
+					if (Identities.Num() > 0)
+					{
+						BuildLine = FString::Printf(TEXT("BUILD  %s"), *FString::Join(Identities, TEXT(" / ")));
+					}
+				}
+			if (RunState == m8authority::RunState::Won)
+			{
+				Center.Add({ TEXT("WARDEN DEFEATED"), FLinearColor(0.35f, 1.0f, 0.65f, 1.0f) });
+				Center.Add({ TEXT("VICTORY"), kHeader });
+				Center.Add({ TimeLine, kBody });
+				Center.Add({ BuildLine, kDim });
+				Center.Add({ TEXT("R   PLAY AGAIN      Q   QUIT"), kBody });
+			}
+			else if (RunState == m8authority::RunState::Failed)
+			{
+				Center.Add({ TEXT("THE RUN ENDS HERE"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ FString::Printf(TEXT("REACHED FLOOR %d"), FM->GetFloorIndex()), kHeader });
+				Center.Add({ TimeLine, kBody });
+				Center.Add({ BuildLine, kDim });
+				Center.Add({ TEXT("R   TRY AGAIN      Q   QUIT"), kBody });
+			}
+			else
+			{
+				Center.Add({ TEXT("FINAL CHALLENGE ERROR"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ TEXT("R   RESTART      Q   QUIT"), kBody });
+			}
+			}
+			break;
+		case m8presentation::Overlay::Pause:
+			bDimSceneForModal = true;
+			Center.Add({ TEXT("PAUSED"), kAccent });
+			Center.Add({ TEXT("ESC   RESUME"), kBody });
+			Center.Add({ TEXT("R   Restart Run      Q   Quit"), kDim });
+			break;
+		case m8presentation::Overlay::Contract:
+			bDimSceneForModal = true;
+			Center.Add({ TEXT("CHOOSE YOUR ROUTE"), kAccent });
+			Center.Add({ FString::Printf(TEXT("[1] SECURE R%d  Recover 25%% HP now"),
+				FM->GetSecureContractRoom()), kBody });
+			Center.Add({ FString::Printf(TEXT("[2] CHALLENGE R%d  Stronger enemies"),
+				FM->GetChallengeContractRoom()), kAccent });
+			Center.Add({ TEXT("Clear challenge: recover 50% HP + gain 1 Resolve"), kDim });
+			break;
+		case m8presentation::Overlay::Reward:
+			bDimSceneForModal = true;
+			if (LC && LC->GetCurrentOfferIds().Num() == 3)
+			{
+				Center.Add({ TEXT("CHOOSE AN UPGRADE"), kAccent });
+				const TArray<int32>& Offer = LC->GetCurrentOfferIds();
+				for (int32 Index = 0; Index < Offer.Num(); ++Index)
+				{
+					Center.Add({ FString::Printf(TEXT("[%d] %s"),
+						Index + 1, *LC->DescribeAffixById(Offer[Index])), kBody });
+				}
+			}
+			else
+			{
+				Center.Add({ TEXT("REWARD DATA UNAVAILABLE"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+				Center.Add({ TEXT("R Restart    Q Quit"), kBody });
+			}
+			break;
+		case m8presentation::Overlay::Onboarding:
+			Center.Add({ TEXT("WASD Move   Mouse Look   F Attack"), kBody });
+			Center.Add({ TEXT("Esc Pause   Q Quit"), kDim });
+			break;
+		case m8presentation::Overlay::None:
+		default:
+			break;
+		}
+
+		if (Center.Num() == 0 && FM->IsProgressionBlockedByExitSafety())
+		{
+			Center.Add({ TEXT("EXIT BLOCKED - SAFETY CHECK FAILED"), FLinearColor(1.0f, 0.25f, 0.2f, 1.0f) });
+			Center.Add({ TEXT("Try the stairs again"), kBody });
+		}
+		else if (Center.Num() == 0 && FM->HasRoomContractFallbackWarning())
+		{
+			Center.Add({ TEXT("CHALLENGE UNAVAILABLE - SECURE AUTO-SELECTED"), kAccent });
+		}
+		else if (Center.Num() == 0 && FM->HasRoomContractUnavailableWarning())
+		{
+			Center.Add({ TEXT("ROOM CONTRACT UNAVAILABLE - CONTINUING SAFELY"), kAccent });
+		}
+	}
+	if (Center.Num() > 0)
+	{
+		if (bDimSceneForModal)
+		{
+			DrawRect(kModalVeil, 0.0f, 0.0f, Canvas->SizeX, Canvas->SizeY);
+		}
+		const float CenterScale = bTitlePresentation
+			? Scale * 1.55f
+			: (bConfirmationPresentation ? Scale * 1.2f : Scale);
+		float CenterW = 0.0f, CenterLineH = 0.0f;
+		MeasurePanel(this, Font, Center, CenterScale, CenterW, CenterLineH);
+		const float CenterPanelW = CenterW + 2.0f * (8.0f * CenterScale);
+		const float CenterPanelH = Center.Num() * CenterLineH
+			+ FMath::Max(0, Center.Num() - 1) * 3.0f * CenterScale + 16.0f * CenterScale;
+		const float CenterY = (bTitlePresentation || bConfirmationPresentation)
+			? FMath::Max(24.0f, (Canvas->SizeY - CenterPanelH) * 0.48f)
+			: FMath::Max(24.0f, ObjectiveY - 12.0f * Scale - CenterPanelH);
+		DrawPanel(this, Font, (Canvas->SizeX - CenterPanelW) * 0.5f,
+			CenterY, Center, CenterScale);
+	}
+
+	// One transient cue lane. Presentation priority wins; the existing synergy component remains
+	// the fallback live owner for proc text, so the HUD never caches or duplicates either state.
+	FString TransientCue = Presentation ? Presentation->GetTransientText() : FString();
+	if (TransientCue.IsEmpty() && Synergy)
+	{
+		TransientCue = Synergy->GetFeedbackText();
+	}
+	if (!bDimSceneForModal && !TransientCue.IsEmpty())
+	{
+		TArray<FHudLine> CueLines;
+		CueLines.Add({ TransientCue, kAccent });
+		float CueW = 0.0f, CueH = 0.0f;
+		MeasurePanel(this, Font, CueLines, Scale * 1.25f, CueW, CueH);
+		DrawPanel(this, Font,
+			FMath::Max(24.0f, (Canvas->SizeX - CueW - 16.0f * Scale) * 0.5f),
+			Canvas->SizeY * 0.72f, CueLines, Scale * 1.25f);
+	}
+
+	// Modal choices and terminal screens are the sole foreground layer. Enemy labels behind
+	// them would read as interactive and visually compete with the player's current decision.
+	if (bDimSceneForModal)
+	{
+		return;
+	}
 
 	// ---------------- M7A.2: per-enemy readout (nameplates + HP bars) ----------------
 	// Same truthfulness contract as the panels: every value below is read live off the
@@ -396,10 +1554,19 @@ void AUegameHUD::DrawHUD()
 			continue;
 		}
 
-		// Nameplate text: "<Grunt|Runner|Brute|Enemy> cur/max". Unassigned enemies (no M6
+		// Nameplate text reads the authoritative combat pool: Warden guard while guarded, HP after.
+		// Unassigned enemies (no M6
 		// assignment: static spawners, unavailable tables) read dim + neutral - never "Grunt".
-		const FString Label = FString::Printf(TEXT("%s %.0f/%.0f"),
-			C.Enemy->GetArchetypeDisplayName(), HC->GetHP(), HC->GetMaxHP());
+		const int32 PoolCurrent = C.Enemy->GetCombatPoolCurrent();
+		const int32 PoolMax = C.Enemy->GetCombatPoolMax();
+		const bool bWardenGuard = C.Enemy->IsWarden()
+			&& C.Enemy->GetWardenPhase() == EUegameWardenPhase::Guarded;
+		const FString Label = C.Enemy->IsWarden()
+			? FString::Printf(TEXT("WARDEN [%s] %s %d/%d"),
+				WardenPhaseName(C.Enemy->GetWardenPhase()),
+				bWardenGuard ? TEXT("Guard") : TEXT("HP"), PoolCurrent, PoolMax)
+			: FString::Printf(TEXT("%s %d/%d"),
+				C.Enemy->GetArchetypeDisplayName(), PoolCurrent, PoolMax);
 		float TextW = 0.0f, TextH = 0.0f;
 		GetTextSize(Label, TextW, TextH, Font, EScale);
 
@@ -420,7 +1587,9 @@ void AUegameHUD::DrawHUD()
 			X + 0.5f * (BlockW - TextW), Y + PadY, Font, EScale, /*bScalePosition=*/false);
 
 		// HP bar: fixed screen-space size, live ratio, UI-space color by remaining fraction.
-		const float Ratio = FMath::Clamp(HC->GetHP() / FMath::Max(HC->GetMaxHP(), 1.0f), 0.0f, 1.0f);
+		const float Ratio = FMath::Clamp(
+			static_cast<float>(PoolCurrent) / FMath::Max(static_cast<float>(PoolMax), 1.0f),
+			0.0f, 1.0f);
 		const FLinearColor Fill = (Ratio > 0.5f) ? kHpGood : (Ratio > 0.25f ? kAccent : kHpBad);
 		const float BarX = static_cast<float>(Proj.X) - 0.5f * BarW;
 		const float BarY = Y + PadY + TextH + Gap;

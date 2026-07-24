@@ -11,7 +11,10 @@
 #include "DungeonStairs.generated.h"
 
 class UBoxComponent;
+class UMaterialInstanceDynamic;
+class UPointLightComponent;
 class UStaticMeshComponent;
+class UTextRenderComponent;
 
 UCLASS()
 class UEGAME_API ADungeonStairs : public AActor
@@ -41,6 +44,7 @@ private:
 
 	/** Ask the FloorManager to descend (gate enforced there). Shared by overlap + clear paths. */
 	void RequestDescendNow();
+	void SetExitReadyVisual(bool bReady);
 
 	/** True while the player pawn is inside the trigger (Begin/End overlap). */
 	bool bPawnInside = false;
@@ -50,4 +54,16 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category="Stairs")
 	TObjectPtr<UStaticMeshComponent> PadMesh;
+
+	UPROPERTY(VisibleAnywhere, Category="Stairs")
+	TObjectPtr<UStaticMeshComponent> BeaconMesh;
+
+	UPROPERTY(VisibleAnywhere, Category="Stairs")
+	TObjectPtr<UPointLightComponent> BeaconLight;
+
+	UPROPERTY(VisibleAnywhere, Category="Stairs")
+	TObjectPtr<UTextRenderComponent> ExitLabel;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> ExitMaterial;
 };

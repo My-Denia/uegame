@@ -2,8 +2,10 @@
 
 #include "LoadoutComponent.h"
 
+#include "BuildSynergyComponent.h"
 #include "CombatConfig.h"
 #include "HealthComponent.h"
+#include "../Presentation/PresentationFeedbackComponent.h"
 #include "GameFramework/Actor.h"
 
 // Engine-agnostic loadout core - .cpp-only include (repo-root PrivateIncludePaths, uegame.Build.cs).
@@ -80,12 +82,27 @@ namespace
 	{
 		switch (A.kind)
 		{
-		case m5::AffixKind::DamagePct:         return FString::Printf(TEXT("Damage %+lld%%"),      static_cast<long long>(A.magnitude));
-		case m5::AffixKind::AttackIntervalPct: return FString::Printf(TEXT("AtkInterval %+lld%%"), static_cast<long long>(A.magnitude));
-		case m5::AffixKind::MaxHpFlat:         return FString::Printf(TEXT("MaxHP %+lld"),         static_cast<long long>(A.magnitude));
+		case m5::AffixKind::DamagePct:
+			return FString::Printf(TEXT("Damage %+lld%% | EXECUTIONER: finish <=40%% HP"),
+				static_cast<long long>(A.magnitude));
+		case m5::AffixKind::AttackIntervalPct:
+			return FString::Printf(TEXT("AtkInterval %+lld%% | TEMPO: keep landing hits"),
+				static_cast<long long>(A.magnitude));
+		case m5::AffixKind::MaxHpFlat:
+			return FString::Printf(TEXT("MaxHP %+lld | BULWARK: take a hit, counter"),
+				static_cast<long long>(A.magnitude));
 		case m5::AffixKind::MoveSpeedPct:      return FString::Printf(TEXT("MoveSpeed %+lld%%"),   static_cast<long long>(A.magnitude));
 		}
 		return TEXT("?");
+	}
+
+	void NotifySynergyComponent(AActor* Owner)
+	{
+		if (UBuildSynergyComponent* Synergy = Owner
+			? Owner->FindComponentByClass<UBuildSynergyComponent>() : nullptr)
+		{
+			Synergy->RefreshFromLoadout();
+		}
 	}
 }
 
@@ -115,6 +132,7 @@ void ULoadoutComponent::InitBaseFromConfig()
 	// Resolve base (zero picks). Do NOT touch HP here - the pawn's BeginPlay already Init()'d the health
 	// component to PlayerMaxHP; re-applying max here would be redundant and could fight that init order.
 	ReResolve(/*bApplyMaxHpToHealth=*/false, /*bTopUpCurrent=*/false);
+	NotifySynergyComponent(GetOwner());
 
 	UE_LOG(LogTemp, Display,
 		TEXT("[Loadout] base initialized: dmg=%d attack_ms=%d max_hp=%d move=%d (pool: see [AffixPool])"),
@@ -211,6 +229,11 @@ bool ULoadoutComponent::GenerateOfferForFloor(uint64 InRunSeed, int32 InFloorInd
 	// which reads CurrentOfferIds live and labels them via DescribeAffixById). The old transient yellow
 	// AddOnScreenDebugMessage was redundant and overlapped the panel, so it is removed (owner readout
 	// item 2). The [Loadout] offer/RewardPending UE_LOG lines above stay as the forensic record.
+	if (UPresentationFeedbackComponent* Presentation = GetOwner()
+		? GetOwner()->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr)
+	{
+		Presentation->EmitRewardOffered();
+	}
 	return true;
 }
 
@@ -236,12 +259,18 @@ bool ULoadoutComponent::ChooseOffer(int32 Index)
 	// Re-resolve and push the (possibly higher) MaxHP to the health component, topping up current HP by the
 	// same delta (immediate-reward rule). Damage / attack_ms are picked up live by CombatComponent::TryAttack.
 	ReResolve(/*bApplyMaxHpToHealth=*/true, /*bTopUpCurrent=*/true);
+	NotifySynergyComponent(GetOwner());
 
 	const m5::Affix* A = FindAffixById(static_cast<uint32>(ChosenId));
 	UE_LOG(LogTemp, Display,
 		TEXT("[Loadout] chose index=%d id=%d (%s) | resolved dmg=%d attack_ms=%d max_hp=%d move=%d | picks=%d"),
 		Index, ChosenId, A ? *DescribeAffix(*A) : TEXT("?"),
 		ResolvedDamage, ResolvedAttackMs, ResolvedMaxHP, ResolvedMoveSpeed, ChosenAffixIds.Num());
+	if (UPresentationFeedbackComponent* Presentation = GetOwner()
+		? GetOwner()->FindComponentByClass<UPresentationFeedbackComponent>() : nullptr)
+	{
+		Presentation->EmitRewardChosen(A ? DescribeAffix(*A) : FString::Printf(TEXT("AFFIX %d"), ChosenId));
+	}
 	return true;
 }
 
@@ -262,6 +291,7 @@ void ULoadoutComponent::ResetForNewRun()
 	// Push base MaxHP back to the health component (no top-up: a new run starts at the base build; the
 	// caller's HealPlayerFull()/Revive then refills current HP to that base max).
 	ReResolve(/*bApplyMaxHpToHealth=*/true, /*bTopUpCurrent=*/false);
+	NotifySynergyComponent(GetOwner());
 	UE_LOG(LogTemp, Display,
 		TEXT("[Loadout] reset for new run (picks cleared; resolved back to base dmg=%d max_hp=%d)"),
 		ResolvedDamage, ResolvedMaxHP);
@@ -276,6 +306,44 @@ FString ULoadoutComponent::DescribeAffixById(int32 Id) const
 		return DescribeAffix(*A);
 	}
 	return TEXT("?");
+}
+
+void ULoadoutComponent::GetSynergyFamilyRanks(
+	int32& OutExecutioner, int32& OutTempo, int32& OutBulwark) const
+{
+	OutExecutioner = 0;
+	OutTempo = 0;
+	OutBulwark = 0;
+	for (const int32 Id : ChosenAffixIds)
+	{
+		const m5::Affix* Affix = FindAffixById(static_cast<uint32>(Id));
+		if (!Affix)
+		{
+			continue;
+		}
+		switch (Affix->kind)
+		{
+		case m5::AffixKind::DamagePct: OutExecutioner = FMath::Min(2, OutExecutioner + 1); break;
+		case m5::AffixKind::AttackIntervalPct: OutTempo = FMath::Min(2, OutTempo + 1); break;
+		case m5::AffixKind::MaxHpFlat: OutBulwark = FMath::Min(2, OutBulwark + 1); break;
+		case m5::AffixKind::MoveSpeedPct: break;
+		}
+	}
+}
+
+uint64 ULoadoutComponent::GetChosenAffixFingerprint() const
+{
+	if (ChosenAffixIds.IsEmpty())
+	{
+		return 0;
+	}
+	uint64 Hash = 14695981039346656037ULL;
+	for (const int32 Id : ChosenAffixIds)
+	{
+		Hash ^= static_cast<uint32>(Id);
+		Hash *= 1099511628211ULL;
+	}
+	return Hash;
 }
 
 void ULoadoutComponent::LogStatus() const

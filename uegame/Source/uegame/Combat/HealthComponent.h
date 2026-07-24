@@ -45,6 +45,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	void Revive(float NewHP = -1.0f);
 
+	/** Restore HP on a living actor without changing MaxHP or death/event state. */
+	float Heal(float Amount);
+
 	/** M5 loadout: change MaxHP without touching dead/event state - a THIRD path, distinct from Init
 	 *  (refills), SetHP (fires OnDeath at 0), and Revive (clears bDead). bTopUpCurrent raises CurrentHP by
 	 *  the same positive delta as MaxHP, so a +MaxHP build pick is an immediate reward, not "go heal to use

@@ -65,6 +65,10 @@ public:
 	 *  (e.g. "Damage +20%%", "MaxHP +60"). Returns "?" for an id not in the pool. Truthful single source:
 	 *  it delegates to the same FindAffixById/DescribeAffix helpers that build the offer string. */
 	FString DescribeAffixById(int32 Id) const;
+	/** M8A family projection from the authoritative selected ids; ranks cap at two. */
+	void GetSynergyFamilyRanks(int32& OutExecutioner, int32& OutTempo, int32& OutBulwark) const;
+	/** Ordered selected-id fingerprint. Empty picks are exactly zero. */
+	uint64 GetChosenAffixFingerprint() const;
 
 	/** Forensic dump for Dungeon.LoadoutStatus (runSeed/floor/offerIndex/pending/offer/chosen/resolved/base). */
 	void LogStatus() const;

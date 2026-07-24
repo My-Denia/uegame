@@ -39,6 +39,44 @@ struct FCombatConfigRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy")
 	float LeashRange = 1400.0f;
 
+	// --- M8 fixed-profile finale (never M4-scaled; source archetype is provenance only) ---
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenMaxHP = 300.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenMoveSpeed = 190.0f;
+
+	/** Assigned damage; the existing M8 behavior commitment rule applies 75% => 12. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenContactDamage = 16.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenDamageInterval = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenAggroRange = 1100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenLeashRange = 1600.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenMeshScale = 1.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	int32 WardenBaseGuard = 120;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	int32 WardenGuardReductionPerResolve = 30;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	int32 WardenMinimumGuard = 60;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenStaggerSeconds = 2.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Warden")
+	float WardenStaggerDamageMultiplier = 1.5f;
+
 	// --- player ---
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Player")
 	float PlayerMaxHP = 100.0f;
@@ -61,11 +99,36 @@ struct FCombatConfigRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Scaling")
 	float PerFloorScaling = 1.0f;
 
+	// --- M8 room risk/reward and pacing recovery (fractions of resolved MaxHP) ---
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float QuietRoomClearHealFraction = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float StandardRoomClearHealFraction = 0.03f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float SkirmishRoomClearHealFraction = 0.06f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float StrongholdRoomClearHealFraction = 0.10f;
+
+	/** After a successful non-final-floor reward pick, recover to at least this fraction of
+	 *  the newly resolved MaxHP. This is a floor, not a fixed heal and never resurrects. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RewardRecoveryFloorFraction = 1.0f;
+
+	/** Non-final floor objective quota: Base + (Floor-1)*PerFloor, capped to the number
+	 *  of combat rooms that actually spawned. The final floor always requires full clear. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0", ClampMax="1024"))
+	int32 RequiredCombatRoomsBase = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0", ClampMax="1024"))
+	int32 RequiredCombatRoomsPerFloor = 1;
+
 	// --- M4 run loop ---
 
-	/** Descend gate policy: false = descend-anytime (pacing and player agency; clearing rooms
-	 *  stays an optional challenge, not a hard gate), true = stairs refuse until every enemy
-	 *  room on the floor is cleared. Current CSV ships true (Run 2.5 stairs-cleared gate). */
+	/** Descend gate policy: false = descend-anytime; true = stairs refuse until the current
+	 *  authoritative room objective is complete. Current CSV ships true. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run")
 	bool bRequireFloorClearToDescend = false;
 

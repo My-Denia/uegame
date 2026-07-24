@@ -4,11 +4,13 @@
 #include "Engine/LocalPlayer.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Combat/BuildSynergyComponent.h"
 #include "Combat/CombatComponent.h"
 #include "Combat/CombatConfig.h"
 #include "Combat/FloorManager.h"
 #include "Combat/HealthComponent.h"
 #include "Combat/LoadoutComponent.h"
+#include "Presentation/PresentationFeedbackComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -20,6 +22,17 @@
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "uegame.h"
+#include "uegamePlayerController.h"
+
+namespace
+{
+bool IsProductShellBlocking(const AuegameCharacter* Character)
+{
+	const AuegamePlayerController* PC = Character
+		? Cast<AuegamePlayerController>(Character->GetController()) : nullptr;
+	return PC && PC->IsBlockingGameplayInput();
+}
+}
 
 AuegameCharacter::AuegameCharacter()
 {
@@ -64,6 +77,8 @@ AuegameCharacter::AuegameCharacter()
 
 	// M5 build-diversity: the loadout state holder (reward-on-clear); base stats built in BeginPlay.
 	Loadout = CreateDefaultSubobject<ULoadoutComponent>(TEXT("Loadout"));
+	BuildSynergy = CreateDefaultSubobject<UBuildSynergyComponent>(TEXT("BuildSynergy"));
+	PresentationFeedback = CreateDefaultSubobject<UPresentationFeedbackComponent>(TEXT("PresentationFeedback"));
 }
 
 void AuegameCharacter::BeginPlay()
@@ -85,6 +100,10 @@ void AuegameCharacter::BeginPlay()
 
 void AuegameCharacter::DoChooseLoadout(int32 Index)
 {
+	if (IsProductShellBlocking(this))
+	{
+		return;
+	}
 	// Route through the FloorManager: it applies the pick on the loadout component AND re-pokes the stairs
 	// so a player already standing on the pad descends once the reward is taken (single choice code path
 	// shared by Dungeon.ChooseLoadout and keys 1/2/3). No-op outside an active run.
@@ -94,7 +113,31 @@ void AuegameCharacter::DoChooseLoadout(int32 Index)
 	}
 }
 
-void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageInstigator*/)
+void AuegameCharacter::DoTogglePause()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->TogglePause();
+	}
+}
+
+void AuegameCharacter::DoManualRestart()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->RequestManualRestart();
+	}
+}
+
+void AuegameCharacter::DoQuit()
+{
+	if (UUegameFloorManager* FM = UUegameFloorManager::Get(GetWorld()))
+	{
+		FM->RequestQuit();
+	}
+}
+
+void AuegameCharacter::HandlePlayerDamaged(float Amount, AActor* /*DamageInstigator*/)
 {
 	// Brief red screen pulse via a camera fade (0.5 -> 0 alpha over 0.25s). No UMG asset; the
 	// [Feedback] anchor makes it grep-testable that the pulse fired on the contact-damage event.
@@ -106,12 +149,16 @@ void AuegameCharacter::HandlePlayerDamaged(float /*Amount*/, AActor* /*DamageIns
 				/*bShouldFadeAudio=*/false, /*bHoldWhenFinished=*/false);
 		}
 	}
+	if (PresentationFeedback)
+	{
+		PresentationFeedback->EmitPlayerDamaged(Amount);
+	}
 	UE_LOG(LogTemp, Display, TEXT("[Feedback] playerPulse hp=%.0f"), Health ? Health->GetHP() : -1.0f);
 }
 
 void AuegameCharacter::DoAttack()
 {
-	if (Combat)
+	if (!IsProductShellBlocking(this) && Combat)
 	{
 		Combat->TryAttack();
 	}
@@ -161,9 +208,13 @@ void AuegameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 		// M5 loadout choice: legacy number keys 1/2/3 pick offer option 0/1/2. Console verb
 		// Dungeon.ChooseLoadout is the mandated forensic interface; these are the playable path.
-		PlayerInputComponent->BindKey(EKeys::One,   IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey0);
-		PlayerInputComponent->BindKey(EKeys::Two,   IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey1);
-		PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey2);
+		PlayerInputComponent->BindKey(EKeys::One, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey0)
+			.bExecuteWhenPaused = true;
+		PlayerInputComponent->BindKey(EKeys::Two, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey1)
+			.bExecuteWhenPaused = true;
+		PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &AuegameCharacter::ChooseLoadoutKey2)
+			.bExecuteWhenPaused = true;
+
 	}
 	else
 	{
@@ -191,7 +242,7 @@ void AuegameCharacter::Look(const FInputActionValue& Value)
 
 void AuegameCharacter::DoMove(float Right, float Forward)
 {
-	if (GetController() != nullptr)
+	if (!IsProductShellBlocking(this) && GetController() != nullptr)
 	{
 		// find out which way is forward
 		const FRotator Rotation = GetController()->GetControlRotation();
@@ -211,7 +262,7 @@ void AuegameCharacter::DoMove(float Right, float Forward)
 
 void AuegameCharacter::DoLook(float Yaw, float Pitch)
 {
-	if (GetController() != nullptr)
+	if (!IsProductShellBlocking(this) && GetController() != nullptr)
 	{
 		// add yaw and pitch input to controller
 		AddControllerYawInput(Yaw);
@@ -221,8 +272,10 @@ void AuegameCharacter::DoLook(float Yaw, float Pitch)
 
 void AuegameCharacter::DoJumpStart()
 {
-	// signal the character to jump
-	Jump();
+	if (!IsProductShellBlocking(this))
+	{
+		Jump();
+	}
 }
 
 void AuegameCharacter::DoJumpEnd()
